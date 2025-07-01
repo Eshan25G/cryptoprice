@@ -595,41 +595,46 @@ def main():
                 st.line_chart(rsi_data, height=200)
                 st.caption("RSI > 70: Overbought (Sell Signal) | RSI < 30: Oversold (Buy Signal)")
             
-            # Trading Strategy Suggestions
-            st.header("💡 Trading Strategy Suggestions")
-            
-            strategy_col1, strategy_col2 = st.columns(2)
-            
-            with strategy_col1:
-                st.subheader("🎯 Entry Strategy")
-                if signals['action'] == 'BUY':
-                    st.success("**Recommended Action: BUY**")
-                    st.write("• Wait for volume confirmation")
-                    st.write("• Enter on any minor dip")
-                    st.write("• Use limit orders near support")
-                    st.write("• Scale in if strong momentum")
-                elif signals['action'] == 'SELL':
-                    st.error("**Recommended Action: SELL**")
-                    st.write("• Short on any bounce to resistance")
-                    st.write("• Use volume spike to enter")
-                    st.write("• Consider multiple timeframes")
-                    st.write("• Tight stop loss required")
-                else:
-                    st.warning("**Recommended Action: HOLD**")
-                    st.write("• Wait for clear breakout")
-                    st.write("• Monitor volume patterns")
-                    st.write("• Watch for trend confirmation")
-                    st.write("• Patience is key")
-            
-            with strategy_col2:
-                st.subheader("🔄 Exit Strategy")
-                st.write("**Take Profit Levels:**")
-                st.write(f"• Primary: 6% gain")
-                st.write(f"• Secondary: 12% gain")
-                st.write(f"• Extended: 20% gain")
-                st.write("")
-                st.write("**Stop Loss Rules:**")
-                st.write("• Never risk more than 2% per trade")
-                st.write("• Trail stops after 5% profit")
-                st.write("• Consider volatility levels")
-                st.write("• Monitor market conditions")
+                # Trading Strategy Suggestions
+    st.header("💡 Trading Strategy Suggestions")
+    
+    strategy_col1, strategy_col2 = st.columns(2)
+    
+    with strategy_col1:
+        st.subheader("🎯 Entry Strategy")
+        if signals['action'] == 'BUY':
+            st.success("**Recommended Action: BUY**")
+            st.write("• Wait for volume confirmation")
+            st.write("• Enter on any minor dip")
+            st.write("• Use limit orders near support")
+            st.write("• Scale in if strong momentum")
+        elif signals['action'] == 'SELL':
+            st.error("**Recommended Action: SELL**")
+            st.write("• Short on any bounce to resistance")
+            st.write("• Use volume spike to enter")
+            st.write("• Consider multiple timeframes")
+            st.write("• Tight stop loss required")
+        else:
+            st.warning("**Recommended Action: HOLD**")
+            st.write("• Wait for clear breakout")
+            st.write("• Monitor volume patterns")
+            st.write("• Watch for trend confirmation")
+            st.write("• Patience is key")
+    
+    with strategy_col2:
+        st.subheader("🔄 Exit Strategy")
+        st.write("**Take Profit Levels:**")
+        st.write(f"• Primary: 6% gain")
+        st.write(f"• Secondary: 12% gain")
+        st.write(f"• Extended: 20% gain")
+        st.write("")
+        st.write("**Stop Loss Rules:**")
+        st.write("• Never risk more than 2% per trade")
+        st.write("• Trail stops after 5% profit")
+        st.write("• Consider volatility levels")
+        st.write("• Monitor market conditions")
+
+except Exception as e:
+    st.error(f"Something went wrong while running the analyzer: {e}")
+if __name__ == "__main__":
+    main()
