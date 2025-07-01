@@ -136,11 +136,15 @@ if os.path.exists("trades.csv"):
 st.subheader("🔁 Backtest a Coin")
 coin_choice = st.selectbox("Choose Coin for Backtesting", list(symbols.keys()))
 df_backtest = get_ohlcv(symbols[coin_choice], interval="1h", limit=500)
-trades, final_value = backtest(df_backtest)
 
-st.write(f"💰 Final Portfolio Value (Starting $1000): **${final_value:.2f}**")
-st.write("📋 Trades:")
-if trades:
-    st.table(pd.DataFrame(trades, columns=["Type", "Time", "Price"]))
+if df_backtest.empty:
+    st.error("⚠️ No data returned for backtest. Try another coin or check API rate limits.")
 else:
-    st.info("No trades executed in backtest period.")
+    trades, final_value = backtest(df_backtest)
+    st.write(f"💰 Final Portfolio Value (Starting $1000): **${final_value:.2f}**")
+
+    st.write("📋 Trades:")
+    if trades:
+        st.table(pd.DataFrame(trades, columns=["Type", "Time", "Price"]))
+    else:
+        st.info("No trades executed in backtest period.")
