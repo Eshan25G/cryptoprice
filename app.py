@@ -1,99 +1,141 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
+import requests
 import ta
-import plotly.graph_objects as go
-from ta.trend import EMAIndicator, MACD
-from ta.momentum import RSIIndicator
+import os
+from datetime import datetime
+from streamlit_autorefresh import st_autorefresh
 
-st.set_page_config(layout="wide")
-st.title("🪙 Crypto Trading Signal & Chart Pattern Analyzer")
+# ------------------- Config -------------------
+st.set_page_config(page_title="Crypto Trading Dashboard", layout="wide")
+st.title("📊 Real-Time Crypto Signal Dashboard")
+st.caption("Powered by Binance API + Streamlit")
 
-# Input Section
-symbol = st.selectbox("Select Crypto Pair", ['BTC-USD', 'ETH-USD', 'SOL-USD', 'ADA-USD', 'XRP-USD'])
-interval = st.selectbox("Select Interval", ["1h", "1d", "1wk"])
-period = st.selectbox("Select Time Range", ["7d", "30d", "90d", "180d"])
+st_autorefresh(interval=30000, key="datarefresh")  # Auto-refresh every 30s
 
-# Fetch Data
-data = yf.download(tickers=symbol, interval=interval, period=period)
-data.dropna(inplace=True)
+symbols = {
+    "BTC/USDT": "BTCUSDT",
+    "ETH/USDT": "ETHUSDT",
+    "SOL/USDT": "SOLUSDT",
+    "ADA/USDT": "ADAUSDT",
+    "XRP/USDT": "XRPUSDT",
+    "DOGE/USDT": "DOGEUSDT",
+    "LTC/USDT": "LTCUSDT",
+    "MATIC/USDT": "MATICUSDT",
+    "DOT/USDT": "DOTUSDT",
+    "AVAX/USDT": "AVAXUSDT"
+}
 
-# Flatten column names if multi-level
-if isinstance(data.columns, pd.MultiIndex):
-    data.columns = [col[0] for col in data.columns]
-
-# Safe conversion
-if 'Close' in data.columns:
-    data['Close'] = pd.to_numeric(data['Close'], errors='coerce')
-else:
-    st.error("❌ 'Close' column not found in data.")
-
-
-# Use native pandas EMA to avoid issues
-data['EMA10'] = data['Close'].ewm(span=10, adjust=False).mean()
-data['EMA50'] = data['Close'].ewm(span=50, adjust=False).mean()
-
-
-# Indicators
-data['EMA10'] = EMAIndicator(data['Close'], window=10).ema_indicator()
-data['EMA50'] = EMAIndicator(data['Close'], window=50).ema_indicator()
-data['RSI'] = RSIIndicator(data['Close'], window=14).rsi()
-macd = MACD(data['Close'])
-data['MACD'] = macd.macd()
-data['MACD_Signal'] = macd.macd_signal()
-
-# Signal Generator
+# ------------------- Signal Generator -------------------
 def generate_signal(df):
-    if df['RSI'].iloc[-1] < 30 and df['MACD'].iloc[-1] > df['MACD_Signal'].iloc[-1] and df['EMA10'].iloc[-1] > df['EMA50'].iloc[-1]:
+    latest = df.iloc[-1]
+    if latest['RSI'] < 30 and latest['MACD'] > latest['MACD_Signal'] and latest['EMA10'] > latest['EMA50']:
         return "📈 BUY"
-    elif df['RSI'].iloc[-1] > 70 and df['MACD'].iloc[-1] < df['MACD_Signal'].iloc[-1] and df['EMA10'].iloc[-1] < df['EMA50'].iloc[-1]:
+    elif latest['RSI'] > 70 and latest['MACD'] < latest['MACD_Signal'] and latest['EMA10'] < latest['EMA50']:
         return "📉 SELL"
     else:
         return "⏸️ NEUTRAL"
 
-signal = generate_signal(data)
-st.subheader(f"Signal for {symbol}: {signal}")
-# Simple Candlestick Pattern Detection
-def detect_patterns(df):
-    latest = df.iloc[-2]
-    patterns = []
+# ------------------- Trade Logger -------------------
+def log_trade(symbol, signal, price):
+    log_entry = {
+        "timestamp": datetime.now(),
+        "symbol": symbol,
+        "signal": signal,
+        "price": price
+    }
+    if os.path.exists("trades.csv"):
+        df = pd.read_csv("trades.csv")
+        df = pd.concat([df, pd.DataFrame([log_entry])], ignore_index=True)
+    else:
+        df = pd.DataFrame([log_entry])
+    df.to_csv("trades.csv", index=False)
 
-    # Doji Detection
-    if abs(latest['Close'] - latest['Open']) < (latest['High'] - latest['Low']) * 0.1:
-        patterns.append("🟨 Doji")
+# ------------------- Get OHLCV Data -------------------
+def get_ohlcv(symbol, interval='1m', limit=100):
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    response = requests.get(url)
+    data = response.json()
+    df = pd.DataFrame(data, columns=[
+        "time", "open", "high", "low", "close", "volume", "_", "_", "_", "_", "_", "_"
+    ])
+    df["time"] = pd.to_datetime(df["time"], unit='ms')
+    df.set_index("time", inplace=True)
+    df = df[["open", "high", "low", "close", "volume"]].astype(float)
 
-    # Bullish Engulfing
-    prev = df.iloc[-3]
-    if prev['Close'] < prev['Open'] and latest['Close'] > latest['Open'] and latest['Close'] > prev['Open'] and latest['Open'] < prev['Close']:
-        patterns.append("🟩 Bullish Engulfing")
+    df['EMA10'] = df['close'].ewm(span=10, adjust=False).mean()
+    df['EMA50'] = df['close'].ewm(span=50, adjust=False).mean()
+    df['RSI'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
+    macd = ta.trend.MACD(df['close'])
+    df['MACD'] = macd.macd()
+    df['MACD_Signal'] = macd.macd_signal()
 
-    # Bearish Engulfing
-    if prev['Close'] > prev['Open'] and latest['Close'] < latest['Open'] and latest['Close'] < prev['Open'] and latest['Open'] > prev['Close']:
-        patterns.append("🟥 Bearish Engulfing")
+    return df
 
-    return patterns
+# ------------------- Backtest -------------------
+def backtest(df):
+    cash = 1000
+    position = 0
+    trades = []
+    for i in range(1, len(df)):
+        if df['RSI'].iloc[i] < 30 and df['EMA10'].iloc[i] > df['EMA50'].iloc[i]:
+            if position == 0:
+                position = cash / df['close'].iloc[i]
+                cash = 0
+                trades.append(('BUY', df.index[i], df['close'].iloc[i]))
+        elif df['RSI'].iloc[i] > 70 and df['EMA10'].iloc[i] < df['EMA50'].iloc[i]:
+            if position > 0:
+                cash = position * df['close'].iloc[i]
+                position = 0
+                trades.append(('SELL', df.index[i], df['close'].iloc[i]))
 
-patterns = detect_patterns(data)
-st.subheader("📐 Chart Patterns Detected:")
-if patterns:
-    for p in patterns:
-        st.markdown(f"- {p}")
+    final_value = cash + (position * df['close'].iloc[-1])
+    return trades, final_value
+
+# ------------------- Scan Multiple Coins -------------------
+dashboard_data = []
+
+for label, ticker in symbols.items():
+    df = get_ohlcv(ticker)
+    if df.empty or df.isnull().values.any():
+        continue
+    signal = generate_signal(df)
+    price = df['close'].iloc[-1]
+    change = (price - df['close'].iloc[0]) / df['close'].iloc[0] * 100
+    dashboard_data.append({
+        "Symbol": label,
+        "Price (USDT)": round(price, 2),
+        "Change (%)": round(change, 2),
+        "Signal": signal
+    })
+
+    # Optional: log signal
+    if signal in ["📈 BUY", "📉 SELL"]:
+        log_trade(label, signal, price)
+
+# ------------------- Show Dashboard -------------------
+st.subheader("📈 Live Signals")
+df_signals = pd.DataFrame(dashboard_data)
+st.dataframe(df_signals.style.applymap(
+    lambda x: "color: green" if x == "📈 BUY" else "color: red" if x == "📉 SELL" else "",
+    subset=["Signal"]
+))
+
+# ------------------- Trade Log -------------------
+if os.path.exists("trades.csv"):
+    st.subheader("📘 Trade Log")
+    trade_log = pd.read_csv("trades.csv")
+    st.dataframe(trade_log)
+
+# ------------------- Backtesting -------------------
+st.subheader("🔁 Backtest a Coin")
+coin_choice = st.selectbox("Choose Coin for Backtesting", list(symbols.keys()))
+df_backtest = get_ohlcv(symbols[coin_choice], interval="1h", limit=500)
+trades, final_value = backtest(df_backtest)
+
+st.write(f"💰 Final Portfolio Value (Starting $1000): **${final_value:.2f}**")
+st.write("📋 Trades:")
+if trades:
+    st.table(pd.DataFrame(trades, columns=["Type", "Time", "Price"]))
 else:
-    st.markdown("No strong patterns detected.")
-
-# Candlestick Chart
-fig = go.Figure(data=[go.Candlestick(x=data.index,
-                                     open=data['Open'],
-                                     high=data['High'],
-                                     low=data['Low'],
-                                     close=data['Close'],
-                                     name='Candles')])
-fig.add_trace(go.Scatter(x=data.index, y=data['EMA10'], line=dict(color='blue'), name='EMA10'))
-fig.add_trace(go.Scatter(x=data.index, y=data['EMA50'], line=dict(color='orange'), name='EMA50'))
-fig.update_layout(xaxis_rangeslider_visible=False)
-st.plotly_chart(fig, use_container_width=True)
-
-# RSI and MACD Plot
-with st.expander("📊 RSI & MACD"):
-    st.line_chart(data[['RSI']])
-    st.line_chart(data[['MACD', 'MACD_Signal']])
+    st.info("No trades executed in backtest period.")
