@@ -17,6 +17,12 @@ period = st.selectbox("Select Time Range", ["7d", "30d", "90d", "180d"])
 # Fetch Data
 data = yf.download(tickers=symbol, interval=interval, period=period)
 data.dropna(inplace=True)
+data['Close'] = pd.to_numeric(data['Close'], errors='coerce')
+
+# Use native pandas EMA to avoid issues
+data['EMA10'] = data['Close'].ewm(span=10, adjust=False).mean()
+data['EMA50'] = data['Close'].ewm(span=50, adjust=False).mean()
+
 
 # Indicators
 data['EMA10'] = EMAIndicator(data['Close'], window=10).ema_indicator()
