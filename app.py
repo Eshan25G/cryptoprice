@@ -59,6 +59,9 @@ def is_doji(df):
 
 # Generate trading signals based on candlestick patterns
 def generate_signal(df):
+    def generate_signal(df):
+    if len(df) < 2:
+        return None, None  # Not enough data for candlestick patterns
     if is_bullish_engulfing(df):
         return "Bullish Engulfing", "long"
     if is_bearish_engulfing(df):
@@ -68,6 +71,12 @@ def generate_signal(df):
     if is_doji(df):
         return "Doji", "neutral"
     return None, None
+
+# In your main code, after fetching df:
+if df is None or len(df) < 2:
+    st.warning("Not enough data to generate signals.")
+    continue
+pattern, direction = generate_signal(df)
 
 # SL/TP Calculation (simple: 1.5 x last candle ATR)
 def calc_sl_tp(df, signal_type):
