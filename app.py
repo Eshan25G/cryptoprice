@@ -116,10 +116,15 @@ for label, ticker in symbols.items():
 # ------------------- Show Dashboard -------------------
 st.subheader("📈 Live Signals")
 df_signals = pd.DataFrame(dashboard_data)
-st.dataframe(df_signals.style.applymap(
-    lambda x: "color: green" if x == "📈 BUY" else "color: red" if x == "📉 SELL" else "",
-    subset=["Signal"]
-))
+if not df_signals.empty and "Signal" in df_signals.columns:
+    styled_df = df_signals.style.applymap(
+        lambda x: "color: green" if x == "📈 BUY" else "color: red" if x == "📉 SELL" else "",
+        subset=["Signal"]
+    )
+    st.dataframe(styled_df)
+else:
+    st.warning("⚠️ No signal data available.")
+
 
 # ------------------- Trade Log -------------------
 if os.path.exists("trades.csv"):
