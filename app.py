@@ -17,7 +17,17 @@ period = st.selectbox("Select Time Range", ["7d", "30d", "90d", "180d"])
 # Fetch Data
 data = yf.download(tickers=symbol, interval=interval, period=period)
 data.dropna(inplace=True)
-data['Close'] = pd.to_numeric(data['Close'], errors='coerce')
+
+# Flatten column names if multi-level
+if isinstance(data.columns, pd.MultiIndex):
+    data.columns = [col[0] for col in data.columns]
+
+# Safe conversion
+if 'Close' in data.columns:
+    data['Close'] = pd.to_numeric(data['Close'], errors='coerce')
+else:
+    st.error("❌ 'Close' column not found in data.")
+
 
 # Use native pandas EMA to avoid issues
 data['EMA10'] = data['Close'].ewm(span=10, adjust=False).mean()
