@@ -1,893 +1,501 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import yfinance as yf
-import matplotlib.pyplot as plt
 import plotly.graph_objects as go
+import plotly.express as px
 from plotly.subplots import make_subplots
+import requests
+import time
+import json
 from datetime import datetime, timedelta
-from sklearn.preprocessing import MinMaxScaler
-import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, LSTM, Dropout
-from tensorflow.keras.optimizers import Adam
-from deap import base, creator, tools, algorithms
-import random
+import ta
+from dataclasses import dataclass
+from typing import Dict, List, Optional
 import warnings
 warnings.filterwarnings('ignore')
 
-# Page configuration
-st.set_page_config(page_title="Stock Portfolio Optimizer", layout="wide")
+# Configuration
+@dataclass
+class TradingConfig:
+    target_daily_profit: float = 5000  # INR
+    max_risk_per_trade: float = 0.02  # 2% of portfolio
+    stop_loss_pct: float = 0.015  # 1.5%
+    take_profit_pct: float = 0.03  # 3%
+    min_rsi_oversold: float = 30
+    max_rsi_overbought: float = 70
+    ema_short: int = 9
+    ema_long: int = 21
+    volume_threshold: float = 1.2  # 20% above average
 
-# Title and description
-st.title("Stock Portfolio Optimization System")
-st.markdown("""
-This application uses LSTM (Long Short-Term Memory) neural networks for stock prediction and
-a Genetic Algorithm for portfolio optimization. The system provides:
-- Historical stock data visualization
-- Price predictions for the next 30 days
-- Buy/Hold/Sell recommendations
-- Optimized portfolio allocation
-""")
-
-# Sidebar for inputs
-with st.sidebar:
-    st.header("Configuration")
+class CryptoDataFetcher:
+    def __init__(self):
+        self.base_url = "https://api.coingecko.com/api/v3"
+        
+    def get_indian_exchanges(self):
+        """Get popular Indian crypto exchanges"""
+        return {
+            'WazirX': 'wazirx',
+            'CoinDCX': 'coindcx',
+            'Bitbns': 'bitbns',
+            'ZebPay': 'zebpay'
+        }
     
-    # Stock selection
-    stock_input = st.text_input("Enter stock symbols (comma-separated)", "AAPL,MSFT,GOOGL,AMZN")
-    stock_list = [s.strip() for s in stock_input.split(',')]
-    
-    # Date range selection
-    today = datetime.now()
-    start_date = st.date_input("Start Date", today - timedelta(days=365*2))
-    end_date = st.date_input("End Date", today)
-    
-    # LSTM parameters
-    st.subheader("LSTM Model Parameters")
-    lookback = st.slider("Lookback Period (days)", 7, 60, 30)
-    epochs = st.slider("Training Epochs", 10, 100, 50)
-    batch_size = st.slider("Batch Size", 8, 64, 32)
-    
-    # Genetic Algorithm parameters
-    st.subheader("Genetic Algorithm Parameters")
-    pop_size = st.slider("Population Size", 50, 200, 100)
-    generations = st.slider("Generations", 10, 100, 30)
-    
-    # Risk preference
-    risk_preference = st.slider("Risk Preference (Higher = More Risk)", 0.0, 1.0, 0.5)
-    
-    # Button to run analysis
-    run_button = st.button("Run Analysis")
-
-# Function to fetch stock data
-@st.cache_data(ttl=3600)
-def fetch_data(tickers, start, end):
-    data = {}
-    info = {}
-    for ticker in tickers:
+    def get_crypto_prices(self, symbols: List[str], vs_currency: str = 'inr'):
+        """Fetch current crypto prices in INR"""
         try:
-            stock = yf.Ticker(ticker)
-            data[ticker] = stock.history(start=start, end=end)
-            info[ticker] = {
-                'name': stock.info.get('shortName', ticker),
-                'sector': stock.info.get('sector', 'N/A'),
-                'industry': stock.info.get('industry', 'N/A'),
-                'marketCap': stock.info.get('marketCap', 'N/A'),
-                'peRatio': stock.info.get('trailingPE', 'N/A'),
-                'divYield': stock.info.get('dividendYield', 'N/A'),
-                'beta': stock.info.get('beta', 'N/A'),
-                '52weekHigh': stock.info.get('fiftyTwoWeekHigh', 'N/A'),
-                '52weekLow': stock.info.get('fiftyTwoWeekLow', 'N/A'),
-                'avgVolume': stock.info.get('averageVolume', 'N/A')
+            symbols_str = ','.join(symbols)
+            url = f"{self.base_url}/simple/price"
+            params = {
+                'ids': symbols_str,
+                'vs_currencies': vs_currency,
+                'include_24hr_change': 'true',
+                'include_24hr_vol': 'true'
             }
+            response = requests.get(url, params=params, timeout=10)
+            return response.json()
         except Exception as e:
-            st.error(f"Error fetching data for {ticker}: {e}")
-            continue
-    return data, info
-
-# Create LSTM model
-def create_lstm_model(lookback):
-    model = Sequential()
-    model.add(LSTM(units=50, return_sequences=True, input_shape=(lookback, 1)))
-    model.add(Dropout(0.2))
-    model.add(LSTM(units=50, return_sequences=False))
-    model.add(Dropout(0.2))
-    model.add(Dense(units=25))
-    model.add(Dense(units=1))
-    model.compile(optimizer=Adam(learning_rate=0.001), loss='mean_squared_error')
-    return model
-
-# Prepare data for LSTM
-def prepare_data(data, lookback):
-    X, y = [], []
-    for i in range(len(data) - lookback):
-        X.append(data[i:i+lookback])
-        y.append(data[i+lookback])
-    return np.array(X), np.array(y)
-
-# Train LSTM and make predictions
-def train_predict_lstm(stock_data, lookback, epochs, batch_size, forecast_days=30):
-    # Get closing prices and normalize
-    data = stock_data['Close'].values.reshape(-1, 1)
-    scaler = MinMaxScaler(feature_range=(0, 1))
-    scaled_data = scaler.fit_transform(data)
+            st.error(f"Error fetching prices: {e}")
+            return {}
     
-    # Prepare training data
-    train_size = int(len(scaled_data) * 0.8)
-    train_data = scaled_data[:train_size]
-    
-    X_train, y_train = prepare_data(train_data, lookback)
-    X_train = X_train.reshape(X_train.shape[0], X_train.shape[1], 1)
-    
-    # Create and train model
-    model = create_lstm_model(lookback)
-    with st.spinner('Training LSTM model...'):
-        model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size, verbose=0)
-    
-    # Make predictions on test data
-    test_data = scaled_data[train_size - lookback:]
-    X_test, y_test = prepare_data(test_data, lookback)
-    X_test = X_test.reshape(X_test.shape[0], X_test.shape[1], 1)
-    
-    predictions = model.predict(X_test)
-    predictions = scaler.inverse_transform(predictions)
-    
-    # Calculate RMSE
-    y_test_unscaled = scaler.inverse_transform(y_test.reshape(-1, 1))
-    rmse = np.sqrt(np.mean(np.square(predictions - y_test_unscaled)))
-    
-    # Future predictions
-    future_predictions = []
-    curr_batch = scaled_data[-lookback:].reshape(1, lookback, 1)
-    
-    for _ in range(forecast_days):
-        future_pred = model.predict(curr_batch)[0]
-        future_predictions.append(future_pred)
-        # Update batch for next prediction
-        curr_batch = np.append(curr_batch[:, 1:, :], [[future_pred]], axis=1)
-    
-    future_predictions = np.array(future_predictions).reshape(-1, 1)
-    future_predictions = scaler.inverse_transform(future_predictions)
-    
-    # Create date range for future predictions
-    last_date = stock_data.index[-1]
-    future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=forecast_days)
-    
-    return predictions, future_predictions, future_dates, rmse
-
-# Genetic Algorithm for portfolio optimization
-def optimize_portfolio(stock_data, risk_preference, pop_size, generations):
-    # Calculate daily returns
-    returns = {}
-    for ticker, data in stock_data.items():
-        returns[ticker] = data['Close'].pct_change().dropna().values
-    
-    # Align return data lengths
-    min_length = min(len(ret) for ret in returns.values())
-    aligned_returns = np.array([returns[ticker][-min_length:] for ticker in stock_data.keys()])
-    
-    # Mean returns and covariance
-    mean_returns = np.mean(aligned_returns, axis=1)
-    cov_matrix = np.cov(aligned_returns)
-    
-    # Define genetic algorithm components
-    creator.create("FitnessMulti", base.Fitness, weights=(1.0, -1.0))
-    creator.create("Individual", list, fitness=creator.FitnessMulti)
-    
-    toolbox = base.Toolbox()
-    
-    # Attribute generator
-    def random_weights():
-        weights = [random.random() for _ in range(len(stock_data))]
-        weights = [w/sum(weights) for w in weights]  # Normalize
-        return weights
-    
-    # Structure initializers
-    toolbox.register("weights", random_weights)
-    toolbox.register("individual", tools.initIterate, creator.Individual, toolbox.weights)
-    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
-    
-    # Evaluation function
-    def evaluate(individual):
-        portfolio_return = np.sum(mean_returns * individual)
-        portfolio_risk = np.sqrt(np.dot(individual, np.dot(cov_matrix, individual)))
-        # Balance return and risk according to risk preference
-        return portfolio_return, (1 - risk_preference) * portfolio_risk
-    
-    toolbox.register("evaluate", evaluate)
-    toolbox.register("mate", tools.cxBlend, alpha=0.5)
-    toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=0.1, indpb=0.2)
-    
-    def checkBounds(min_val=0.0, max_val=1.0):
-        def decorator(func):
-            def wrapper(*args, **kargs):
-                offspring = func(*args, **kargs)
-                for child in offspring:
-                    for i in range(len(child)):
-                        if child[i] > max_val:
-                            child[i] = max_val
-                        elif child[i] < min_val:
-                            child[i] = min_val
-                    # Normalize
-                    total = sum(child)
-                    child[:] = [i/total for i in child]
-                return offspring
-            return wrapper
-        return decorator
-    
-    toolbox.register("select", tools.selNSGA2)
-    toolbox.decorate("mate", checkBounds(0.0, 1.0))
-    toolbox.decorate("mutate", checkBounds(0.0, 1.0))
-    
-    # Run the algorithm
-    with st.spinner('Running genetic algorithm...'):
-        population = toolbox.population(n=pop_size)
-        hof = tools.ParetoFront()
-        
-        stats = tools.Statistics(lambda ind: ind.fitness.values)
-        stats.register("avg", np.mean, axis=0)
-        stats.register("min", np.min, axis=0)
-        stats.register("max", np.max, axis=0)
-        
-        algorithms.eaSimple(population, toolbox, cxpb=0.7, mutpb=0.3, 
-                          ngen=generations, stats=stats, halloffame=hof, verbose=False)
-    
-    # Select best individual based on risk preference
-    best_idx = 0
-    if len(hof) > 1:
-        returns = [ind.fitness.values[0] for ind in hof]
-        risks = [ind.fitness.values[1] for ind in hof]
-        # Normalize returns and risks
-        max_return, min_return = max(returns), min(returns)
-        max_risk, min_risk = max(risks), min(risks)
-        
-        norm_returns = [(r - min_return) / (max_return - min_return) if max_return > min_return else 0.5 for r in returns]
-        norm_risks = [(r - min_risk) / (max_risk - min_risk) if max_risk > min_risk else 0.5 for r in risks]
-        
-        # Calculate utility based on risk preference
-        utilities = [risk_preference * ret - (1 - risk_preference) * risk for ret, risk in zip(norm_returns, norm_risks)]
-        best_idx = utilities.index(max(utilities))
-    
-    best_portfolio = list(hof[best_idx])
-    portfolio_return = np.sum(mean_returns * best_portfolio)
-    portfolio_risk = np.sqrt(np.dot(best_portfolio, np.dot(cov_matrix, best_portfolio)))
-    
-    # Annualize return and risk
-    annual_return = (1 + portfolio_return) ** 252 - 1
-    annual_risk = portfolio_risk * np.sqrt(252)
-    
-    return best_portfolio, annual_return, annual_risk
-
-# Generate buy/hold/sell recommendation
-def generate_recommendation(current_price, predicted_prices, historical_volatility):
-    avg_pred_price = np.mean(predicted_prices)
-    price_change_pct = (avg_pred_price - current_price) / current_price
-    
-    # Calculate confidence interval based on historical volatility
-    daily_vol = historical_volatility / np.sqrt(252)
-    price_range_low = current_price * (1 + price_change_pct - 1.96 * daily_vol * np.sqrt(30))
-    price_range_high = current_price * (1 + price_change_pct + 1.96 * daily_vol * np.sqrt(30))
-    
-    # Decision thresholds (adjustable)
-    buy_threshold = 0.05  # 5% expected increase
-    sell_threshold = -0.03  # 3% expected decrease
-    
-    if price_change_pct > buy_threshold:
-        action = "BUY"
-        explanation = f"The stock is predicted to increase by {price_change_pct:.2%} over the next 30 days."
-    elif price_change_pct < sell_threshold:
-        action = "SELL"
-        explanation = f"The stock is predicted to decrease by {price_change_pct:.2%} over the next 30 days."
-    else:
-        action = "HOLD"
-        explanation = f"The stock is predicted to have minimal movement ({price_change_pct:.2%}) over the next 30 days."
-    
-    return {
-        "action": action,
-        "explanation": explanation,
-        "avg_predicted_price": avg_pred_price,
-        "price_change_pct": price_change_pct,
-        "price_range_low": price_range_low,
-        "price_range_high": price_range_high
-    }
-
-# Main analysis function
-def run_analysis(stock_list, start_date, end_date, lookback, epochs, batch_size, 
-                pop_size, generations, risk_preference):
-    # Fetch data
-    with st.spinner('Fetching stock data...'):
-        stock_data, stock_info = fetch_data(stock_list, start_date, end_date)
-    
-    if not stock_data:
-        st.error("No data available for the selected stocks.")
-        return
-    
-    # Create tabs
-    tabs = st.tabs(["Overview", "Stock Analysis", "Portfolio Optimization", "Recommendations"])
-    
-    # Overview tab
-    with tabs[0]:
-        st.header("Portfolio Overview")
-        
-        # Display stock information
-        for ticker in stock_data:
-            st.subheader(f"{stock_info[ticker]['name']} ({ticker})")
-            
-            # Create two columns for info display
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.write(f"**Sector:** {stock_info[ticker]['sector']}")
-                st.write(f"**Industry:** {stock_info[ticker]['industry']}")
-                st.write(f"**Market Cap:** {stock_info[ticker]['marketCap']:,}" if isinstance(stock_info[ticker]['marketCap'], (int, float)) else f"**Market Cap:** {stock_info[ticker]['marketCap']}")
-                st.write(f"**P/E Ratio:** {stock_info[ticker]['peRatio']:.2f}" if isinstance(stock_info[ticker]['peRatio'], (int, float)) else f"**P/E Ratio:** {stock_info[ticker]['peRatio']}")
-                st.write(f"**Dividend Yield:** {stock_info[ticker]['divYield']*100:.2f}%" if isinstance(stock_info[ticker]['divYield'], (int, float)) else f"**Dividend Yield:** {stock_info[ticker]['divYield']}")
-            
-            with col2:
-                st.write(f"**Beta:** {stock_info[ticker]['beta']:.2f}" if isinstance(stock_info[ticker]['beta'], (int, float)) else f"**Beta:** {stock_info[ticker]['beta']}")
-                st.write(f"**52-Week High:** ${stock_info[ticker]['52weekHigh']:.2f}" if isinstance(stock_info[ticker]['52weekHigh'], (int, float)) else f"**52-Week High:** {stock_info[ticker]['52weekHigh']}")
-                st.write(f"**52-Week Low:** ${stock_info[ticker]['52weekLow']:.2f}" if isinstance(stock_info[ticker]['52weekLow'], (int, float)) else f"**52-Week Low:** {stock_info[ticker]['52weekLow']}")
-                st.write(f"**Average Volume:** {stock_info[ticker]['avgVolume']:,}" if isinstance(stock_info[ticker]['avgVolume'], (int, float)) else f"**Average Volume:** {stock_info[ticker]['avgVolume']}")
-                st.write(f"**Current Price:** ${stock_data[ticker]['Close'].iloc[-1]:.2f}")
-            
-            # Display performance metrics
-            returns = stock_data[ticker]['Close'].pct_change().dropna()
-            st.write(f"**Daily Returns (Mean):** {returns.mean()*100:.2f}%")
-            st.write(f"**Daily Volatility:** {returns.std()*100:.2f}%")
-            st.write(f"**Annual Volatility:** {returns.std()*np.sqrt(252)*100:.2f}%")
-            
-            # Historical price chart
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=stock_data[ticker].index,
-                y=stock_data[ticker]['Close'],
-                mode='lines',
-                name=f'{ticker} Close Price',
-                line={'color': 'blue'}
-            ))
-            fig.update_layout(
-                title=f'{ticker} Historical Price',
-                xaxis_title='Date',
-                yaxis_title='Price ($)',
-                height=400
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            
-            st.markdown("---")
-    
-    # Stock Analysis tab
-    with tabs[1]:
-        st.header("Stock Analysis and Predictions")
-        
-        # Analyze each stock with LSTM
-        predictions_data = {}
-        
-        for ticker in stock_data:
-            st.subheader(f"{ticker} Price Prediction Analysis")
-            
-            # Train LSTM and get predictions
-            with st.spinner(f'Training LSTM model for {ticker}...'):
-                predictions, future_predictions, future_dates, rmse = train_predict_lstm(
-                    stock_data[ticker], lookback, epochs, batch_size)
-            
-            # Store predictions for recommendations
-            predictions_data[ticker] = {
-                'current_price': stock_data[ticker]['Close'].iloc[-1],
-                'future_predictions': future_predictions.flatten(),
-                'historical_volatility': stock_data[ticker]['Close'].pct_change().std()
+    def get_historical_data(self, coin_id: str, days: int = 30):
+        """Fetch historical price data"""
+        try:
+            url = f"{self.base_url}/coins/{coin_id}/market_chart"
+            params = {
+                'vs_currency': 'inr',
+                'days': days,
+                'interval': 'hourly' if days <= 30 else 'daily'
             }
+            response = requests.get(url, params=params, timeout=10)
+            data = response.json()
             
-            # Visualization of actual vs predicted prices
-            test_start_idx = int(len(stock_data[ticker]) * 0.8)
-            test_data = stock_data[ticker].iloc[test_start_idx:]
+            df = pd.DataFrame(data['prices'], columns=['timestamp', 'price'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df['volume'] = [vol[1] for vol in data['total_volumes']]
+            df.set_index('timestamp', inplace=True)
             
-            fig = make_subplots(specs=[[{"secondary_y": True}]])
+            return df
+        except Exception as e:
+            st.error(f"Error fetching historical data: {e}")
+            return pd.DataFrame()
+
+class TechnicalAnalysis:
+    @staticmethod
+    def calculate_indicators(df: pd.DataFrame):
+        """Calculate technical indicators"""
+        if df.empty:
+            return df
             
-            # Past data and predictions
-            fig.add_trace(
-                go.Scatter(
-                    x=test_data.index,
-                    y=test_data['Close'],
-                    mode='lines',
-                    name='Actual Price',
-                    line={'color': 'blue'}
-                )
-            )
-            
-            fig.add_trace(
-                go.Scatter(
-                    x=test_data.index[-len(predictions):],
-                    y=predictions.flatten(),
-                    mode='lines',
-                    name='Predicted Price',
-                    line={'color': 'red', 'dash': 'dash'}
-                )
-            )
-            
-            # Future predictions
-            fig.add_trace(
-                go.Scatter(
-                    x=future_dates,
-                    y=future_predictions.flatten(),
-                    mode='lines',
-                    name='Future Prediction',
-                    line={'color': 'green'}
-                )
-            )
-            
-            # Add confidence intervals for future predictions
-            daily_vol = predictions_data[ticker]['historical_volatility'] / np.sqrt(252)
-            upper_bound = [future_predictions[i][0] * (1 + 1.96 * daily_vol * np.sqrt(i+1)) for i in range(len(future_predictions))]
-            lower_bound = [future_predictions[i][0] * (1 - 1.96 * daily_vol * np.sqrt(i+1)) for i in range(len(future_predictions))]
-            
-            fig.add_trace(
-                go.Scatter(
-                    x=future_dates,
-                    y=upper_bound,
-                    mode='lines',
-                    name='Upper Bound (95% CI)',
-                    line={'color': 'rgba(0,128,0,0.2)'},
-                    fill=None
-                )
-            )
-            
-            fig.add_trace(
-                go.Scatter(
-                    x=future_dates,
-                    y=lower_bound,
-                    mode='lines',
-                    name='Lower Bound (95% CI)',
-                    line={'color': 'rgba(0,128,0,0.2)'},
-                    fill='tonexty'
-                )
-            )
-            
-            fig.update_layout(
-                title=f'{ticker} Price Prediction (RMSE: ${rmse:.2f})',
-                xaxis_title='Date',
-                yaxis_title='Price ($)',
-                height=500,
-                hovermode='x unified'
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Model performance metrics
-            st.write(f"**RMSE (Root Mean Square Error):** ${rmse:.2f}")
-            
-            # Calculate MAPE
-            actual = test_data['Close'].iloc[-len(predictions):].values
-            mape = np.mean(np.abs((actual - predictions.flatten()) / actual)) * 100
-            st.write(f"**MAPE (Mean Absolute Percentage Error):** {mape:.2f}%")
-            
-            # Future price statistics
-            st.write("### 30-Day Price Forecast")
-            st.write(f"**Starting Price:** ${predictions_data[ticker]['current_price']:.2f}")
-            st.write(f"**Average Predicted Price:** ${np.mean(future_predictions):.2f}")
-            st.write(f"**Predicted Price Range:** ${np.min(lower_bound):.2f} - ${np.max(upper_bound):.2f}")
-            st.write(f"**Predicted Change:** {((np.mean(future_predictions) - predictions_data[ticker]['current_price']) / predictions_data[ticker]['current_price'] * 100):.2f}%")
-            
-            st.markdown("---")
+        # Moving averages
+        df['EMA_9'] = ta.trend.ema_indicator(df['price'], window=9)
+        df['EMA_21'] = ta.trend.ema_indicator(df['price'], window=21)
+        df['SMA_50'] = ta.trend.sma_indicator(df['price'], window=50)
+        
+        # RSI
+        df['RSI'] = ta.momentum.rsi(df['price'], window=14)
+        
+        # MACD
+        macd = ta.trend.MACD(df['price'])
+        df['MACD'] = macd.macd()
+        df['MACD_signal'] = macd.macd_signal()
+        df['MACD_histogram'] = macd.macd_diff()
+        
+        # Bollinger Bands
+        bb = ta.volatility.BollingerBands(df['price'])
+        df['BB_upper'] = bb.bollinger_hband()
+        df['BB_middle'] = bb.bollinger_mavg()
+        df['BB_lower'] = bb.bollinger_lband()
+        
+        # Volume indicators
+        df['volume_sma'] = df['volume'].rolling(window=20).mean()
+        df['volume_ratio'] = df['volume'] / df['volume_sma']
+        
+        # Support and Resistance
+        df['support'] = df['price'].rolling(window=20).min()
+        df['resistance'] = df['price'].rolling(window=20).max()
+        
+        return df
     
-    # Portfolio Optimization tab
-    with tabs[2]:
-        st.header("Portfolio Optimization")
-        
-        # Run genetic algorithm for portfolio optimization
-        with st.spinner('Optimizing portfolio allocation...'):
-            optimal_weights, expected_return, expected_risk = optimize_portfolio(
-                stock_data, risk_preference, pop_size, generations)
-        
-        # Display optimization results
-        st.subheader("Optimal Portfolio Allocation")
-        
-        # Prepare data for visualization
-        allocation_data = {
-            'Stock': list(stock_data.keys()),
-            'Allocation': [f"{w*100:.2f}%" for w in optimal_weights],
-            'Weight': optimal_weights
-        }
-        
-        # Show allocation table
-        allocation_df = pd.DataFrame(allocation_data)
-        st.dataframe(allocation_df[['Stock', 'Allocation']])
-        
-        # Pie chart of allocations
-        fig = go.Figure(data=[go.Pie(
-            labels=allocation_df['Stock'],
-            values=allocation_df['Weight'],
-            hoverinfo='label+percent',
-            textinfo='label+percent'
-        )])
-        
-        fig.update_layout(
-            title='Portfolio Allocation',
-            height=500
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Portfolio performance metrics
-        st.subheader("Expected Portfolio Performance")
-        st.write(f"**Expected Annual Return:** {expected_return*100:.2f}%")
-        st.write(f"**Expected Annual Risk (Volatility):** {expected_risk*100:.2f}%")
-        st.write(f"**Sharpe Ratio (Rf=0%):** {(expected_return/expected_risk):.2f}")
-        
-        # Efficient frontier simulation
-        st.subheader("Efficient Frontier Analysis")
-        
-        # Simulate different portfolios
-        num_portfolios = 1000
-        returns = []
-        volatilities = []
-        
-        # Calculate returns and volatilities for random portfolios
-        for _ in range(num_portfolios):
-            weights = np.random.random(len(stock_data))
-            weights /= np.sum(weights)
+    @staticmethod
+    def generate_signals(df: pd.DataFrame, config: TradingConfig):
+        """Generate buy/sell signals"""
+        if df.empty or len(df) < 50:
+            return df
             
-            # Calculate returns and volatility
-            returns_data = np.array([stock_data[ticker]['Close'].pct_change().dropna().values 
-                             for ticker in stock_data.keys()])
-            min_length = min(len(ret) for ret in returns_data)
-            aligned_returns = np.array([ret[-min_length:] for ret in returns_data])
+        signals = []
+        
+        for i in range(1, len(df)):
+            signal = 'HOLD'
+            confidence = 0
             
-            mean_returns = np.mean(aligned_returns, axis=1)
-            cov_matrix = np.cov(aligned_returns)
+            current = df.iloc[i]
+            previous = df.iloc[i-1]
             
-            portfolio_return = np.sum(mean_returns * weights)
-            portfolio_volatility = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+            # Buy conditions
+            buy_conditions = [
+                current['RSI'] < config.min_rsi_oversold,  # Oversold
+                current['EMA_9'] > current['EMA_21'],  # Short EMA above long EMA
+                current['price'] > current['BB_lower'],  # Above lower Bollinger Band
+                current['MACD'] > current['MACD_signal'],  # MACD bullish
+                current['volume_ratio'] > config.volume_threshold,  # High volume
+                current['price'] > previous['price']  # Price increasing
+            ]
             
-            # Annualize
-            returns.append((1 + portfolio_return) ** 252 - 1)
-            volatilities.append(portfolio_volatility * np.sqrt(252))
+            # Sell conditions
+            sell_conditions = [
+                current['RSI'] > config.max_rsi_overbought,  # Overbought
+                current['EMA_9'] < current['EMA_21'],  # Short EMA below long EMA
+                current['price'] < current['BB_upper'],  # Below upper Bollinger Band
+                current['MACD'] < current['MACD_signal'],  # MACD bearish
+                current['price'] < previous['price']  # Price decreasing
+            ]
+            
+            buy_score = sum(buy_conditions)
+            sell_score = sum(sell_conditions)
+            
+            if buy_score >= 4:
+                signal = 'BUY'
+                confidence = buy_score / len(buy_conditions)
+            elif sell_score >= 4:
+                signal = 'SELL'
+                confidence = sell_score / len(sell_conditions)
+            
+            signals.append({'signal': signal, 'confidence': confidence})
         
-        # Plot efficient frontier
-        fig = go.Figure()
+        signal_df = pd.DataFrame(signals, index=df.index[1:])
+        df = df.iloc[1:].join(signal_df)
         
-        # Add random portfolios
-        fig.add_trace(go.Scatter(
-            x=volatilities,
-            y=returns,
-            mode='markers',
-            marker=dict(
-                size=5,
-                color='rgba(100, 100, 100, 0.5)'
-            ),
-            name='Random Portfolios'
-        ))
-        
-        # Add optimal portfolio
-        fig.add_trace(go.Scatter(
-            x=[expected_risk],
-            y=[expected_return],
-            mode='markers',
-            marker=dict(
-                size=15,
-                color='red'
-            ),
-            name='Optimal Portfolio'
-        ))
-        
-        fig.update_layout(
-            title='Efficient Frontier',
-            xaxis_title='Annualized Risk (Volatility)',
-            yaxis_title='Annualized Return',
-            height=500
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
+        return df
+
+class PortfolioManager:
+    def __init__(self, initial_capital: float = 100000):  # 1 Lakh INR
+        self.initial_capital = initial_capital
+        self.current_capital = initial_capital
+        self.positions = {}
+        self.trade_history = []
+        self.daily_pnl = []
     
-    # Recommendations tab
-    with tabs[3]:
-        st.header("Investment Recommendations")
+    def calculate_position_size(self, price: float, risk_pct: float):
+        """Calculate position size based on risk management"""
+        risk_amount = self.current_capital * risk_pct
+        position_size = risk_amount / price
+        return position_size
+    
+    def execute_trade(self, symbol: str, action: str, price: float, quantity: float, confidence: float):
+        """Execute a trade"""
+        trade_value = price * quantity
         
-        # Generate recommendations for each stock
-        recommendations = {}
-        for ticker in predictions_data:
-            recommendations[ticker] = generate_recommendation(
-                predictions_data[ticker]['current_price'],
-                predictions_data[ticker]['future_predictions'],
-                predictions_data[ticker]['historical_volatility']
-            )
-        
-        # Display recommendations
-        for ticker in recommendations:
-            rec = recommendations[ticker]
+        if action == 'BUY' and trade_value <= self.current_capital:
+            self.positions[symbol] = {
+                'quantity': quantity,
+                'entry_price': price,
+                'entry_time': datetime.now(),
+                'stop_loss': price * (1 - 0.015),  # 1.5% stop loss
+                'take_profit': price * (1 + 0.03),  # 3% take profit
+                'confidence': confidence
+            }
+            self.current_capital -= trade_value
             
-            # Set color based on recommendation
-            if rec['action'] == 'BUY':
-                color = 'green'
-            elif rec['action'] == 'SELL':
-                color = 'red'
-            else:
-                color = 'orange'
-            
-            st.markdown(f"### {ticker}: <span style='color:{color};font-weight:bold'>{rec['action']}</span>", unsafe_allow_html=True)
-            
-            # Current price and prediction
-            st.write(f"**Current Price:** ${predictions_data[ticker]['current_price']:.2f}")
-            st.write(f"**Average Predicted Price (30 days):** ${rec['avg_predicted_price']:.2f}")
-            st.write(f"**Expected Change:** {rec['price_change_pct']*100:.2f}%")
-            
-            # Price range
-            st.write(f"**Predicted Price Range (95% confidence):**")
-            st.write(f"${rec['price_range_low']:.2f} to ${rec['price_range_high']:.2f}")
-            
-            # Explanation
-            st.write(f"**Analysis:** {rec['explanation']}")
-            
-            # Visualize prediction
-            fig = go.Figure()
-            
-            # Current price line
-            fig.add_hline(
-                y=predictions_data[ticker]['current_price'],
-                line_width=2,
-                line_dash="dash",
-                line_color="blue",
-                annotation_text="Current Price",
-                annotation_position="bottom right"
-            )
-            
-            # Prediction range
-            fig.add_trace(go.Indicator(
-                mode="gauge+number",
-                value=rec['avg_predicted_price'],
-                title={'text': f"{ticker} 30-Day Price Forecast"},
-                gauge={
-                    'axis': {'range': [rec['price_range_low']*0.9, rec['price_range_high']*1.1]},
-                    'bar': {'color': color},
-                    'steps': [
-                        {'range': [rec['price_range_low'], rec['price_range_high']], 'color': 'lightgray'}
-                    ],
-                    'threshold': {
-                        'line': {'color': "black", 'width': 4},
-                        'thickness': 0.75,
-                        'value': predictions_data[ticker]['current_price']
-                    }
-                }
-            ))
-            
-            fig.update_layout(height=300)
-            st.plotly_chart(fig, use_container_width=True)
-            
-            st.markdown("---")
-        
-        # Overall portfolio recommendation
-        st.subheader("Portfolio Strategy Recommendation")
-        
-        # Count recommendations
-        buy_count = sum(1 for rec in recommendations.values() if rec['action'] == 'BUY')
-        sell_count = sum(1 for rec in recommendations.values() if rec['action'] == 'SELL')
-        hold_count = sum(1 for rec in recommendations.values() if rec['action'] == 'HOLD')
-        
-        # Generate overall strategy
-        if buy_count > sell_count and buy_count > hold_count:
-            strategy = "Increase investment in the portfolio"
-            explanation = "The majority of stocks in your portfolio are expected to rise. Consider adding to your positions."
-        elif sell_count > buy_count and sell_count > hold_count:
-            strategy = "Reduce exposure to the portfolio"
-            explanation = "The majority of stocks in your portfolio are expected to decline. Consider taking profits or cutting losses."
-        else:
-            strategy = "Maintain current positions"
-            explanation = "The majority of stocks in your portfolio are expected to remain stable. Hold your current positions."
-        
-        st.markdown(f"### Overall Strategy: **{strategy}**")
-        st.write(explanation)
-        
-        # Show recommendation distribution
-        rec_data = {
-            'Recommendation': ['BUY', 'HOLD', 'SELL'],
-            'Count': [buy_count, hold_count, sell_count]
-        }
-        
-        # Create recommendation distribution chart
-        fig = go.Figure(data=[go.Bar(
-            x=rec_data['Recommendation'],
-            y=rec_data['Count'],
-            marker_color=['green', 'orange', 'red']
-        )])
-        
-        fig.update_layout(
-            title='Recommendation Distribution',
-            xaxis_title='Recommendation',
-            yaxis_title='Number of Stocks',
-            height=400
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Investment plan based on optimization
-        st.subheader("Investment Plan")
-        st.write("""
-        Based on our portfolio optimization and stock predictions, we recommend the following investment plan:
-        """)
-        
-        # Create allocation recommendation
-        allocation_rec = []
-        for ticker, weight in zip(stock_data.keys(), optimal_weights):
-            current_rec = recommendations[ticker]['action']
-            
-            if current_rec == 'BUY':
-                suggested_change = "Increase allocation"
-                action = f"Buy more {ticker}"
-            elif current_rec == 'SELL':
-                suggested_change = "Decrease allocation"
-                action = f"Reduce {ticker} position"
-            else:
-                suggested_change = "Maintain allocation"
-                action = f"Hold {ticker}"
-            
-            allocation_rec.append({
-                'Stock': ticker,
-                'Optimal Weight': f"{weight*100:.2f}%",
-                'Recommendation': current_rec,
-                'Suggested Change': suggested_change,
-                'Action': action
+            self.trade_history.append({
+                'symbol': symbol,
+                'action': action,
+                'price': price,
+                'quantity': quantity,
+                'value': trade_value,
+                'time': datetime.now(),
+                'confidence': confidence
             })
-        
-        # Display investment plan table
-        st.table(pd.DataFrame(allocation_rec))
-        
-        # Risk assessment
-        st.subheader("Risk Assessment")
-        
-        # Calculate portfolio beta
-        portfolio_beta = 0
-        for ticker, weight in zip(stock_data.keys(), optimal_weights):
-            stock_beta = stock_info[ticker]['beta']
-            if isinstance(stock_beta, (int, float)):
-                portfolio_beta += weight * stock_beta
             
-        if isinstance(portfolio_beta, (int, float)):
-            st.write(f"**Portfolio Beta:** {portfolio_beta:.2f}")
+        elif action == 'SELL' and symbol in self.positions:
+            position = self.positions[symbol]
+            profit_loss = (price - position['entry_price']) * position['quantity']
+            self.current_capital += trade_value
             
-            if portfolio_beta > 1.2:
-                st.write("Your portfolio has **high market sensitivity**. It's likely to amplify market movements in both directions.")
-            elif portfolio_beta < 0.8:
-                st.write("Your portfolio has **low market sensitivity**. It's likely to be more stable during market fluctuations.")
-            else:
-                st.write("Your portfolio has **moderate market sensitivity**, closely tracking overall market movements.")
-        
-        st.write(f"**Portfolio Volatility:** {expected_risk*100:.2f}%")
-        
-        # Market correlation analysis
-        st.subheader("Market Correlation Analysis")
-        
-        try:
-            # Fetch S&P 500 data for comparison
-            spy_data = yf.download('^GSPC', start=start_date, end=end_date)['Close']
+            self.trade_history.append({
+                'symbol': symbol,
+                'action': action,
+                'price': price,
+                'quantity': position['quantity'],
+                'value': trade_value,
+                'profit_loss': profit_loss,
+                'time': datetime.now(),
+                'confidence': confidence
+            })
             
-            # Calculate correlations with market
-            correlations = []
-            for ticker in stock_data:
-                stock_returns = stock_data[ticker]['Close'].pct_change().dropna()
-                spy_returns = spy_data.pct_change().dropna()
-                
-                # Align dates
-                aligned_data = pd.concat([stock_returns, spy_returns], axis=1).dropna()
-                if len(aligned_data) > 0:
-                    correlation = aligned_data.iloc[:, 0].corr(aligned_data.iloc[:, 1])
-                    correlations.append({
-                        'Stock': ticker,
-                        'Market Correlation': correlation
-                    })
-            
-            # Display correlation table
-            if correlations:
-                st.table(pd.DataFrame(correlations))
-                
-                # Visualize correlations
-                fig = go.Figure(data=[go.Bar(
-                    x=[c['Stock'] for c in correlations],
-                    y=[c['Market Correlation'] for c in correlations],
-                    marker_color='blue'
-                )])
-                
-                fig.update_layout(
-                    title='Market Correlation by Stock',
-                    xaxis_title='Stock',
-                    yaxis_title='Correlation with S&P 500',
-                    height=400
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-        except Exception as e:
-            st.write("Unable to perform market correlation analysis.")
-            st.write(f"Error: {e}")
+            del self.positions[symbol]
+    
+    def get_portfolio_value(self, current_prices: Dict):
+        """Calculate current portfolio value"""
+        total_value = self.current_capital
+        
+        for symbol, position in self.positions.items():
+            if symbol in current_prices:
+                current_price = current_prices[symbol]
+                position_value = current_price * position['quantity']
+                total_value += position_value
+        
+        return total_value
+    
+    def get_daily_profit(self):
+        """Calculate daily profit"""
+        today = datetime.now().date()
+        today_trades = [t for t in self.trade_history if t['time'].date() == today]
+        
+        daily_profit = sum([t.get('profit_loss', 0) for t in today_trades if 'profit_loss' in t])
+        return daily_profit
 
-# Run the main app
-if "run_clicked" not in st.session_state:
-    st.session_state.run_clicked = False
-
-if run_button or st.session_state.run_clicked:
-    st.session_state.run_clicked = True
-    run_analysis(stock_list, start_date, end_date, lookback, epochs, batch_size, 
-                pop_size, generations, risk_preference)
-else:
-    st.write("Configure your parameters and click 'Run Analysis' to start.")
+def create_price_chart(df: pd.DataFrame, symbol: str):
+    """Create candlestick chart with indicators"""
+    if df.empty:
+        return go.Figure()
     
-    # Display example visualization
-    st.subheader("Example Visualization")
-    
-    # Create demo data
-    dates = pd.date_range(start=datetime.now() - timedelta(days=365), periods=365)
-    prices = np.random.normal(loc=100, scale=2, size=365).cumsum() + 100
-    
-    # Generate sample plot
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=dates,
-        y=prices,
-        mode='lines',
-        name='Sample Stock Price',
-        line={'color': 'blue'}
-    ))
-    
-    # Add some prediction data
-    future_dates = pd.date_range(start=dates[-1] + pd.Timedelta(days=1), periods=30)
-    last_price = prices[-1]
-    future_prices = np.random.normal(loc=0, scale=1, size=30).cumsum() + last_price
-    
-    fig.add_trace(go.Scatter(
-        x=future_dates,
-        y=future_prices,
-        mode='lines',
-        name='Sample Prediction',
-        line={'color': 'green'}
-    ))
-    
-    fig.update_layout(
-        title='Example Stock Price Prediction',
-        xaxis_title='Date',
-        yaxis_title='Price ($)',
-        height=500
+    fig = make_subplots(
+        rows=3, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.05,
+        subplot_titles=(f'{symbol} Price & Indicators', 'RSI', 'MACD'),
+        row_width=[0.6, 0.2, 0.2]
     )
     
-    st.plotly_chart(fig, use_container_width=True)
+    # Price and moving averages
+    fig.add_trace(go.Scatter(x=df.index, y=df['price'], name='Price', line=dict(color='blue')), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['EMA_9'], name='EMA 9', line=dict(color='orange')), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['EMA_21'], name='EMA 21', line=dict(color='red')), row=1, col=1)
     
-    # Feature explanation
-    st.markdown("""
-    ## System Features
+    # Bollinger Bands
+    fig.add_trace(go.Scatter(x=df.index, y=df['BB_upper'], name='BB Upper', line=dict(color='gray', dash='dash')), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['BB_lower'], name='BB Lower', line=dict(color='gray', dash='dash')), row=1, col=1)
     
-    This portfolio optimization system provides:
+    # Buy/Sell signals
+    buy_signals = df[df['signal'] == 'BUY']
+    sell_signals = df[df['signal'] == 'SELL']
     
-    1. **Stock Analysis**
-       - Historical performance visualization
-       - Company information and key metrics
-       - Technical indicators
+    if not buy_signals.empty:
+        fig.add_trace(go.Scatter(x=buy_signals.index, y=buy_signals['price'], 
+                                mode='markers', name='Buy Signal', 
+                                marker=dict(color='green', size=10, symbol='triangle-up')), row=1, col=1)
     
-    2. **LSTM Prediction Model**
-       - 30-day price forecasts
-       - Price range predictions with confidence intervals
-       - Model performance metrics (RMSE, MAPE)
+    if not sell_signals.empty:
+        fig.add_trace(go.Scatter(x=sell_signals.index, y=sell_signals['price'], 
+                                mode='markers', name='Sell Signal', 
+                                marker=dict(color='red', size=10, symbol='triangle-down')), row=1, col=1)
     
-    3. **Genetic Algorithm Optimization**
-       - Optimal portfolio allocation
-       - Risk-return analysis
-       - Efficient frontier visualization
+    # RSI
+    fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], name='RSI', line=dict(color='purple')), row=2, col=1)
+    fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
+    fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
     
-    4. **Investment Recommendations**
-       - Buy/Hold/Sell recommendations for each stock
-       - Price targets and expected returns
-       - Overall portfolio strategy
+    # MACD
+    fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], name='MACD', line=dict(color='blue')), row=3, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['MACD_signal'], name='MACD Signal', line=dict(color='red')), row=3, col=1)
+    fig.add_trace(go.Bar(x=df.index, y=df['MACD_histogram'], name='MACD Histogram'), row=3, col=1)
     
-    Configure the parameters in the sidebar and click "Run Analysis" to get started.
-    """)
+    fig.update_layout(height=800, title=f'{symbol} Technical Analysis', showlegend=True)
+    return fig
 
-# Add footer
-st.markdown("""
----
-### How to Use This System
+def main():
+    st.set_page_config(page_title="Crypto Trading System - India", layout="wide")
+    
+    st.title("🚀 Advanced Crypto Trading System for India")
+    st.markdown("*Target: ₹5,000 daily profit through systematic trading*")
+    
+    # Initialize components
+    if 'data_fetcher' not in st.session_state:
+        st.session_state.data_fetcher = CryptoDataFetcher()
+        st.session_state.portfolio = PortfolioManager()
+        st.session_state.config = TradingConfig()
+    
+    # Sidebar configuration
+    with st.sidebar:
+        st.header("⚙️ Trading Configuration")
+        
+        # Portfolio settings
+        st.subheader("Portfolio Settings")
+        initial_capital = st.number_input("Initial Capital (INR)", min_value=10000, value=100000, step=10000)
+        target_profit = st.number_input("Daily Profit Target (INR)", min_value=1000, value=5000, step=500)
+        
+        # Risk management
+        st.subheader("Risk Management")
+        max_risk = st.slider("Max Risk per Trade (%)", min_value=1.0, max_value=5.0, value=2.0, step=0.1)
+        stop_loss = st.slider("Stop Loss (%)", min_value=0.5, max_value=3.0, value=1.5, step=0.1)
+        take_profit = st.slider("Take Profit (%)", min_value=1.0, max_value=5.0, value=3.0, step=0.1)
+        
+        # Update configuration
+        st.session_state.config.target_daily_profit = target_profit
+        st.session_state.config.max_risk_per_trade = max_risk / 100
+        st.session_state.config.stop_loss_pct = stop_loss / 100
+        st.session_state.config.take_profit_pct = take_profit / 100
+    
+    # Main dashboard
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Portfolio Value", f"₹{st.session_state.portfolio.current_capital:,.2f}")
+    
+    with col2:
+        daily_profit = st.session_state.portfolio.get_daily_profit()
+        st.metric("Daily P&L", f"₹{daily_profit:,.2f}", delta=f"{(daily_profit/target_profit)*100:.1f}% of target")
+    
+    with col3:
+        st.metric("Active Positions", len(st.session_state.portfolio.positions))
+    
+    with col4:
+        st.metric("Total Trades", len(st.session_state.portfolio.trade_history))
+    
+    # Crypto selection and analysis
+    st.header("📊 Market Analysis")
+    
+    # Popular cryptos in India
+    popular_cryptos = {
+        'Bitcoin': 'bitcoin',
+        'Ethereum': 'ethereum',
+        'Binance Coin': 'binancecoin',
+        'Cardano': 'cardano',
+        'Solana': 'solana',
+        'Dogecoin': 'dogecoin',
+        'Polygon': 'matic-network',
+        'Chainlink': 'chainlink'
+    }
+    
+    selected_crypto = st.selectbox("Select Cryptocurrency", list(popular_cryptos.keys()))
+    crypto_id = popular_cryptos[selected_crypto]
+    
+    # Fetch and display data
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        with st.spinner(f"Fetching {selected_crypto} data..."):
+            # Get historical data
+            df = st.session_state.data_fetcher.get_historical_data(crypto_id, days=30)
+            
+            if not df.empty:
+                # Calculate technical indicators
+                df = TechnicalAnalysis.calculate_indicators(df)
+                df = TechnicalAnalysis.generate_signals(df, st.session_state.config)
+                
+                # Display chart
+                fig = create_price_chart(df, selected_crypto)
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Latest signals
+                if not df.empty:
+                    latest = df.iloc[-1]
+                    st.subheader("Current Signal")
+                    
+                    signal_col1, signal_col2, signal_col3 = st.columns(3)
+                    with signal_col1:
+                        signal_color = {'BUY': 'green', 'SELL': 'red', 'HOLD': 'gray'}[latest['signal']]
+                        st.markdown(f"**Signal:** <span style='color:{signal_color}'>{latest['signal']}</span>", unsafe_allow_html=True)
+                    
+                    with signal_col2:
+                        st.markdown(f"**Confidence:** {latest['confidence']:.2%}")
+                    
+                    with signal_col3:
+                        st.markdown(f"**RSI:** {latest['RSI']:.1f}")
+    
+    with col2:
+        st.subheader("📈 Current Prices")
+        
+        # Get current prices
+        crypto_symbols = list(popular_cryptos.values())
+        prices = st.session_state.data_fetcher.get_crypto_prices(crypto_symbols)
+        
+        if prices:
+            for name, symbol in popular_cryptos.items():
+                if symbol in prices:
+                    price_data = prices[symbol]
+                    price = price_data.get('inr', 0)
+                    change_24h = price_data.get('inr_24h_change', 0)
+                    
+                    color = 'green' if change_24h > 0 else 'red'
+                    st.markdown(f"""
+                    **{name}**  
+                    ₹{price:,.2f}  
+                    <span style='color:{color}'>{change_24h:+.2f}%</span>
+                    """, unsafe_allow_html=True)
+        
+        st.subheader("🏢 Indian Exchanges")
+        exchanges = st.session_state.data_fetcher.get_indian_exchanges()
+        for exchange_name in exchanges.keys():
+            st.write(f"• {exchange_name}")
+    
+    # Trading interface
+    st.header("💼 Trading Interface")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("Manual Trading")
+        
+        trade_crypto = st.selectbox("Select Crypto for Trading", list(popular_cryptos.keys()), key='trade_select')
+        trade_action = st.selectbox("Action", ['BUY', 'SELL'])
+        trade_amount = st.number_input("Amount (INR)", min_value=100, value=1000, step=100)
+        
+        if st.button("Execute Trade"):
+            # Get current price
+            crypto_symbol = popular_cryptos[trade_crypto]
+            current_prices = st.session_state.data_fetcher.get_crypto_prices([crypto_symbol])
+            
+            if current_prices and crypto_symbol in current_prices:
+                price = current_prices[crypto_symbol]['inr']
+                quantity = trade_amount / price
+                
+                st.session_state.portfolio.execute_trade(
+                    trade_crypto, trade_action, price, quantity, 0.8
+                )
+                st.success(f"Executed {trade_action} order for {trade_crypto}")
+                st.rerun()
+    
+    with col2:
+        st.subheader("Active Positions")
+        
+        if st.session_state.portfolio.positions:
+            for symbol, position in st.session_state.portfolio.positions.items():
+                with st.expander(f"{symbol} Position"):
+                    st.write(f"**Quantity:** {position['quantity']:.6f}")
+                    st.write(f"**Entry Price:** ₹{position['entry_price']:,.2f}")
+                    st.write(f"**Stop Loss:** ₹{position['stop_loss']:,.2f}")
+                    st.write(f"**Take Profit:** ₹{position['take_profit']:,.2f}")
+                    st.write(f"**Confidence:** {position['confidence']:.2%}")
+                    
+                    if st.button(f"Close {symbol} Position"):
+                        # Close position logic here
+                        st.info("Position closed!")
+        else:
+            st.info("No active positions")
+    
+    # Performance analytics
+    st.header("📊 Performance Analytics")
+    
+    if st.session_state.portfolio.trade_history:
+        trades_df = pd.DataFrame(st.session_state.portfolio.trade_history)
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("Trade History")
+            st.dataframe(trades_df.tail(10), use_container_width=True)
+        
+        with col2:
+            st.subheader("Performance Metrics")
+            
+            # Calculate metrics
+            completed_trades = trades_df[trades_df['action'] == 'SELL']
+            if not completed_trades.empty:
+                total_profit = completed_trades['profit_loss'].sum()
+                win_rate = (completed_trades['profit_loss'] > 0).mean()
+                avg_profit = completed_trades['profit_loss'].mean()
+                
+                st.metric("Total Profit/Loss", f"₹{total_profit:,.2f}")
+                st.metric("Win Rate", f"{win_rate:.2%}")
+                st.metric("Average Trade P&L", f"₹{avg_profit:,.2f}")
+    else:
+        st.info("No trading history available")
+    
+    # Auto-refresh
+    if st.checkbox("Auto-refresh (30 seconds)"):
+        time.sleep(30)
+        st.rerun()
 
-1. **Enter Stock Symbols**: Input the stock symbols you're interested in analyzing, separated by commas.
-2. **Select Date Range**: Choose the historical data period for analysis.
-3. **Adjust Model Parameters**: Fine-tune the LSTM and Genetic Algorithm parameters for better results.
-4. **Set Risk Preference**: Adjust your risk tolerance to influence portfolio optimization.
-5. **Run Analysis**: Click the button to start the analysis process.
-6. **Review Results**: Explore the different tabs to see predictions, optimal allocations, and recommendations.
-
-**Note**: The predictions are based on historical patterns and may not account for unexpected market events. Always combine these insights with fundamental analysis and market research before making investment decisions.
-""")
+if __name__ == "__main__":
+    main()
