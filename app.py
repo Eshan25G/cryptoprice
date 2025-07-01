@@ -1,135 +1,83 @@
 import streamlit as st
+import yfinance as yf
 import pandas as pd
-import numpy as np
-import requests
-from datetime import datetime, timedelta
+import ta
+import plotly.graph_objects as go
+from ta.trend import EMAIndicator, MACD
+from ta.momentum import RSIIndicator
 
-# Function to fetch historical data (using Binance as a proxy, since CoinSwitch API is not public)
-def get_binance_klines(symbol, interval='15m', lookback=200):
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={lookback}"
-    try:
-        data = requests.get(url, timeout=10).json()
-        if not isinstance(data, list) or len(data) == 0:
-            return pd.DataFrame()  # Empty DataFrame if no data or error
-        df = pd.DataFrame(data, columns=[
-            'open_time', 'open', 'high', 'low', 'close', 'volume',
-            'close_time', 'quote_asset_volume', 'num_trades',
-            'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
-        ])
-        df['open'] = df['open'].astype(float)
-        df['high'] = df['high'].astype(float)
-        df['low'] = df['low'].astype(float)
-        df['close'] = df['close'].astype(float)
-        df['volume'] = df['volume'].astype(float)
-        df['time'] = pd.to_datetime(df['open_time'], unit='ms')
-        return df[['time', 'open', 'high', 'low', 'close', 'volume']]
-    except Exception as e:
-        st.error(f"Error fetching data for {symbol}: {e}")
-        return pd.DataFrame()
+st.set_page_config(layout="wide")
+st.title("🪙 Crypto Trading Signal & Chart Pattern Analyzer")
 
-# Candlestick pattern detection functions
-def is_bullish_engulfing(df):
-    if len(df) < 2:
-        return False
-    prev = df.iloc[-2]
-    curr = df.iloc[-1]
-    return (
-        prev['close'] < prev['open'] and
-        curr['close'] > curr['open'] and
-        curr['close'] > prev['open'] and
-        curr['open'] < prev['close']
-    )
+# Input Section
+symbol = st.selectbox("Select Crypto Pair", ['BTC-USD', 'ETH-USD', 'SOL-USD', 'ADA-USD', 'XRP-USD'])
+interval = st.selectbox("Select Interval", ["1h", "1d", "1wk"])
+period = st.selectbox("Select Time Range", ["7d", "30d", "90d", "180d"])
 
-def is_bearish_engulfing(df):
-    if len(df) < 2:
-        return False
-    prev = df.iloc[-2]
-    curr = df.iloc[-1]
-    return (
-        prev['close'] > prev['open'] and
-        curr['close'] < curr['open'] and
-        curr['open'] > prev['close'] and
-        curr['close'] < prev['open']
-    )
+# Fetch Data
+data = yf.download(tickers=symbol, interval=interval, period=period)
+data.dropna(inplace=True)
 
-def is_hammer(df):
-    if len(df) < 1:
-        return False
-    curr = df.iloc[-1]
-    body = abs(curr['close'] - curr['open'])
-    lower_shadow = min(curr['open'], curr['close']) - curr['low']
-    upper_shadow = curr['high'] - max(curr['open'], curr['close'])
-    candle_length = curr['high'] - curr['low']
-    return (
-        candle_length > 0 and
-        body < candle_length * 0.3 and
-        lower_shadow > body * 2 and
-        upper_shadow < body
-    )
+# Indicators
+data['EMA10'] = EMAIndicator(data['Close'], window=10).ema_indicator()
+data['EMA50'] = EMAIndicator(data['Close'], window=50).ema_indicator()
+data['RSI'] = RSIIndicator(data['Close'], window=14).rsi()
+macd = MACD(data['Close'])
+data['MACD'] = macd.macd()
+data['MACD_Signal'] = macd.macd_signal()
 
-def is_doji(df):
-    if len(df) < 1:
-        return False
-    curr = df.iloc[-1]
-    return abs(curr['close'] - curr['open']) < (curr['high'] - curr['low']) * 0.1
-
-# Generate trading signals based on candlestick patterns
+# Signal Generator
 def generate_signal(df):
-    if len(df) < 2:
-        return None, None  # Not enough data for candlestick patterns
-    if is_bullish_engulfing(df):
-        return "Bullish Engulfing", "long"
-    if is_bearish_engulfing(df):
-        return "Bearish Engulfing", "short"
-    if is_hammer(df):
-        return "Hammer", "long"
-    if is_doji(df):
-        return "Doji", "neutral"
-    return None, None
-
-# SL/TP Calculation (simple: 1.5 x last candle ATR)
-def calc_sl_tp(df, signal_type):
-    if len(df) < 14:
-        atr = df['high'].max() - df['low'].min()  # fallback if not enough data
+    if df['RSI'].iloc[-1] < 30 and df['MACD'].iloc[-1] > df['MACD_Signal'].iloc[-1] and df['EMA10'].iloc[-1] > df['EMA50'].iloc[-1]:
+        return "📈 BUY"
+    elif df['RSI'].iloc[-1] > 70 and df['MACD'].iloc[-1] < df['MACD_Signal'].iloc[-1] and df['EMA10'].iloc[-1] < df['EMA50'].iloc[-1]:
+        return "📉 SELL"
     else:
-        atr = df['high'].iloc[-14:].max() - df['low'].iloc[-14:].min()
-    entry = df['close'].iloc[-1]
-    if signal_type == "long":
-        sl = entry - atr * 0.8
-        tp = entry + atr * 1.5
-    elif signal_type == "short":
-        sl = entry + atr * 0.8
-        tp = entry - atr * 1.5
-    else:
-        sl, tp = None, None
-    return sl, tp
+        return "⏸️ NEUTRAL"
 
-# Streamlit UI
-st.set_page_config(page_title="Crypto Futures Signal Generator", layout="wide")
-st.title("Crypto Futures Signal Generator (ETH, SOL, XRP) - Candlestick Patterns")
+signal = generate_signal(data)
+st.subheader(f"Signal for {symbol}: {signal}")
+# Simple Candlestick Pattern Detection
+def detect_patterns(df):
+    latest = df.iloc[-2]
+    patterns = []
 
-symbols = {
-    "ETHUSDT": "Ethereum",
-    "SOLUSDT": "Solana",
-    "XRPUSDT": "XRP"
-}
+    # Doji Detection
+    if abs(latest['Close'] - latest['Open']) < (latest['High'] - latest['Low']) * 0.1:
+        patterns.append("🟨 Doji")
 
-interval = st.selectbox("Candle Interval", ["15m", "1h", "4h"], index=0)
-selected_symbols = st.multiselect("Select Coins", list(symbols.keys()), default=list(symbols.keys()))
+    # Bullish Engulfing
+    prev = df.iloc[-3]
+    if prev['Close'] < prev['Open'] and latest['Close'] > latest['Open'] and latest['Close'] > prev['Open'] and latest['Open'] < prev['Close']:
+        patterns.append("🟩 Bullish Engulfing")
 
-for sym in selected_symbols:
-    st.subheader(f"{symbols[sym]} ({sym})")
-    df = get_binance_klines(sym, interval, lookback=200)
-    if df is None or len(df) < 2:
-        st.warning("Not enough data to generate signals.")
-        continue
-    pattern, direction = generate_signal(df)
-    if pattern:
-        sl, tp = calc_sl_tp(df, direction)
-        st.success(f"Pattern Detected: **{pattern}** | Signal: **{direction.upper()}**")
-        st.write(f"Entry: `{df['close'].iloc[-1]:.2f}` | SL: `{sl:.2f}` | TP: `{tp:.2f}`")
-        st.line_chart(df.set_index('time')['close'][-50:])
-    else:
-        st.warning("No tradable candlestick pattern detected in the latest candle.")
+    # Bearish Engulfing
+    if prev['Close'] > prev['Open'] and latest['Close'] < latest['Open'] and latest['Close'] < prev['Open'] and latest['Open'] > prev['Close']:
+        patterns.append("🟥 Bearish Engulfing")
 
-st.info("Signals are for educational purposes. Always backtest and use proper risk management.")
+    return patterns
+
+patterns = detect_patterns(data)
+st.subheader("📐 Chart Patterns Detected:")
+if patterns:
+    for p in patterns:
+        st.markdown(f"- {p}")
+else:
+    st.markdown("No strong patterns detected.")
+
+# Candlestick Chart
+fig = go.Figure(data=[go.Candlestick(x=data.index,
+                                     open=data['Open'],
+                                     high=data['High'],
+                                     low=data['Low'],
+                                     close=data['Close'],
+                                     name='Candles')])
+fig.add_trace(go.Scatter(x=data.index, y=data['EMA10'], line=dict(color='blue'), name='EMA10'))
+fig.add_trace(go.Scatter(x=data.index, y=data['EMA50'], line=dict(color='orange'), name='EMA50'))
+fig.update_layout(xaxis_rangeslider_visible=False)
+st.plotly_chart(fig, use_container_width=True)
+
+# RSI and MACD Plot
+with st.expander("📊 RSI & MACD"):
+    st.line_chart(data[['RSI']])
+    st.line_chart(data[['MACD', 'MACD_Signal']])
