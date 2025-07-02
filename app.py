@@ -1,4 +1,4 @@
-!pip install streamlit pandas numpy plotly yfinance tensorflow scikit-learn requests
+pip install streamlit pandas numpy plotly yfinance tensorflow scikit-learn requests
 import streamlit as st
 import pandas as pd
 import numpy as np
