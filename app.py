@@ -1,18 +1,33 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import yfinance as yf
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_absolute_error, mean_squared_error
-from sklearn.preprocessing import StandardScaler
 import requests
 from datetime import datetime, timedelta
 import warnings
+import json
+import time
 warnings.filterwarnings('ignore')
+
+# Try to import optional dependencies
+try:
+    import yfinance as yf
+    YFINANCE_AVAILABLE = True
+except ImportError:
+    YFINANCE_AVAILABLE = False
+    st.error("yfinance not found. Please install it with: pip install yfinance")
+
+try:
+    from sklearn.ensemble import RandomForestRegressor
+    from sklearn.model_selection import train_test_split
+    from sklearn.metrics import mean_absolute_error, mean_squared_error
+    from sklearn.preprocessing import StandardScaler
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
+    st.warning("scikit-learn not found. ML predictions will be disabled. Install with: pip install scikit-learn")
 
 # Configure Streamlit page
 st.set_page_config(
@@ -108,25 +123,126 @@ prediction_days = st.sidebar.slider(
 )
 
 @st.cache_data(ttl=300)  # Cache for 5 minutes
-def fetch_crypto_data(symbol, period):
+def fetch_crypto_data_yfinance(symbol, period):
     """Fetch cryptocurrency data from Yahoo Finance"""
+    if not YFINANCE_AVAILABLE:
+        return None
     try:
         ticker = yf.Ticker(symbol)
         data = ticker.history(period=period)
         return data
     except Exception as e:
-        st.error(f"Error fetching data: {e}")
+        st.error(f"Error fetching data from Yahoo Finance: {e}")
         return None
+
+@st.cache_data(ttl=300)
+def fetch_crypto_data_api(symbol, days=365):
+    """Fetch cryptocurrency data from CoinGecko API as fallback"""
+    try:
+        # Convert symbol to CoinGecko format
+        symbol_map = {
+            'BTC-USD': 'bitcoin',
+            'ETH-USD': 'ethereum', 
+            'BNB-USD': 'binancecoin',
+            'ADA-USD': 'cardano',
+            'SOL-USD': 'solana',
+            'DOT-USD': 'polkadot',
+            'DOGE-USD': 'dogecoin',
+            'AVAX-USD': 'avalanche-2',
+            'MATIC-USD': 'matic-network',
+            'LINK-USD': 'chainlink'
+        }
+        
+        coin_id = symbol_map.get(symbol, 'bitcoin')
+        
+        # Fetch data from CoinGecko
+        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+        params = {
+            'vs_currency': 'usd',
+            'days': min(days, 365),  # CoinGecko free tier limit
+            'interval': 'daily' if days > 90 else 'hourly'
+        }
+        
+        response = requests.get(url, params=params, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            # Convert to DataFrame
+            prices = data.get('prices', [])
+            volumes = data.get('total_volumes', [])
+            
+            if prices:
+                df = pd.DataFrame(prices, columns=['timestamp', 'close'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                df.set_index('timestamp', inplace=True)
+                
+                # Add volume data if available
+                if volumes:
+                    vol_df = pd.DataFrame(volumes, columns=['timestamp', 'volume'])
+                    vol_df['timestamp'] = pd.to_datetime(vol_df['timestamp'], unit='ms')
+                    vol_df.set_index('timestamp', inplace=True)
+                    df = df.join(vol_df)
+                else:
+                    df['volume'] = 0
+                
+                # Create OHLC data (simplified - using close price)
+                df['open'] = df['close'].shift(1).fillna(df['close'])
+                df['high'] = df['close'] * 1.02  # Approximate
+                df['low'] = df['close'] * 0.98   # Approximate
+                
+                # Rename columns to match yfinance format
+                df.columns = ['Close', 'Volume', 'Open', 'High', 'Low']
+                df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
+                
+                return df
+                
+        return None
+        
+    except Exception as e:
+        st.error(f"Error fetching data from CoinGecko: {e}")
+        return None
+
+def fetch_crypto_data(symbol, period):
+    """Main function to fetch crypto data with fallbacks"""
+    # Convert period to days for API
+    period_to_days = {
+        '1mo': 30,
+        '3mo': 90, 
+        '6mo': 180,
+        '1y': 365,
+        '2y': 730,
+        '5y': 1825
+    }
+    
+    days = period_to_days.get(period, 365)
+    
+    # Try Yahoo Finance first
+    if YFINANCE_AVAILABLE:
+        data = fetch_crypto_data_yfinance(symbol, period)
+        if data is not None and not data.empty:
+            return data
+    
+    # Fallback to CoinGecko API
+    st.info("Using CoinGecko API as data source...")
+    return fetch_crypto_data_api(symbol, days)
 
 @st.cache_data(ttl=300)
 def get_crypto_info(symbol):
     """Get cryptocurrency information"""
-    try:
-        ticker = yf.Ticker(symbol)
-        info = ticker.info
-        return info
-    except:
-        return {}
+    if YFINANCE_AVAILABLE:
+        try:
+            ticker = yf.Ticker(symbol)
+            info = ticker.info
+            return info
+        except:
+            pass
+    
+    # Fallback to basic info
+    return {
+        'marketCap': None,
+        'symbol': symbol.replace('-USD', '').upper()
+    }
 
 def calculate_technical_indicators(data):
     """Calculate technical indicators"""
@@ -180,6 +296,9 @@ def prepare_features(data):
 
 def create_ml_model(data, target_days=7):
     """Create and train machine learning model"""
+    if not SKLEARN_AVAILABLE:
+        return None, None, None, "scikit-learn not available"
+        
     # Prepare features
     feature_columns = [
         'Open', 'High', 'Low', 'Volume',
@@ -316,36 +435,63 @@ if data is not None and not data.empty:
     # Machine Learning Prediction
     st.subheader("🤖 AI Price Prediction")
     
-    with st.spinner("Training prediction model..."):
-        model, scaler, features, metrics = create_ml_model(data, prediction_days)
-    
-    if model is not None:
-        # Make prediction
-        predicted_price = predict_future_prices(model, scaler, data, features, prediction_days)
+    if SKLEARN_AVAILABLE:
+        with st.spinner("Training prediction model..."):
+            model, scaler, features, metrics = create_ml_model(data, prediction_days)
         
-        if predicted_price is not None:
-            prediction_change = predicted_price - current_price
-            prediction_change_pct = (prediction_change / current_price) * 100
+        if model is not None:
+            # Make prediction
+            predicted_price = predict_future_prices(model, scaler, data, features, prediction_days)
             
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown(f"""
-                <div class="prediction-box">
-                    <h3>Predicted Price ({prediction_days} days)</h3>
-                    <h1>${predicted_price:,.2f}</h1>
-                    <p>Expected Change: {prediction_change_pct:+.2f}%</p>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            with col2:
-                st.markdown("**Model Performance:**")
-                st.metric("Mean Absolute Error", f"${metrics['MAE']:.2f}")
-                st.metric("Root Mean Square Error", f"${metrics['RMSE']:.2f}")
+            if predicted_price is not None:
+                prediction_change = predicted_price - current_price
+                prediction_change_pct = (prediction_change / current_price) * 100
                 
-                # Model confidence
-                confidence = max(0, min(100, 100 - (metrics['MAE'] / current_price) * 100))
-                st.metric("Model Confidence", f"{confidence:.1f}%")
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown(f"""
+                    <div class="prediction-box">
+                        <h3>Predicted Price ({prediction_days} days)</h3>
+                        <h1>${predicted_price:,.2f}</h1>
+                        <p>Expected Change: {prediction_change_pct:+.2f}%</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with col2:
+                    st.markdown("**Model Performance:**")
+                    st.metric("Mean Absolute Error", f"${metrics['MAE']:.2f}")
+                    st.metric("Root Mean Square Error", f"${metrics['RMSE']:.2f}")
+                    
+                    # Model confidence
+                    confidence = max(0, min(100, 100 - (metrics['MAE'] / current_price) * 100))
+                    st.metric("Model Confidence", f"{confidence:.1f}%")
+            else:
+                st.warning("Unable to generate price prediction with current data.")
+        else:
+            st.warning("Insufficient data for machine learning model.")
+    else:
+        st.warning("🚫 Machine Learning predictions disabled. Install scikit-learn to enable.")
+        
+        # Simple trend-based prediction as fallback
+        st.info("📈 Using simple trend analysis instead...")
+        
+        # Calculate simple moving average trend
+        recent_prices = data['Close'].tail(7)
+        trend = recent_prices.iloc[-1] - recent_prices.iloc[0]
+        simple_prediction = current_price + (trend * prediction_days / 7)
+        
+        prediction_change = simple_prediction - current_price
+        prediction_change_pct = (prediction_change / current_price) * 100
+        
+        st.markdown(f"""
+        <div class="prediction-box">
+            <h3>Trend-Based Estimate ({prediction_days} days)</h3>
+            <h1>${simple_prediction:,.2f}</h1>
+            <p>Expected Change: {prediction_change_pct:+.2f}%</p>
+            <small>⚠️ Based on simple trend analysis</small>
+        </div>
+        """, unsafe_allow_html=True)
     
     # Create interactive chart
     st.subheader("📈 Price Chart with Technical Indicators")
