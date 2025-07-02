@@ -1,150 +1,531 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
+import yfinance as yf
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.preprocessing import StandardScaler
 import requests
-import ta
-import os
-from datetime import datetime
-from streamlit_autorefresh import st_autorefresh
+from datetime import datetime, timedelta
+import warnings
+warnings.filterwarnings('ignore')
 
-# ------------------- Config -------------------
-st.set_page_config(page_title="Crypto Trading Dashboard", layout="wide")
-st.title("📊 Real-Time Crypto Signal Dashboard")
-st.caption("Powered by Binance API + Streamlit")
+# Configure Streamlit page
+st.set_page_config(
+    page_title="Crypto Price Predictor",
+    page_icon="₿",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-st_autorefresh(interval=30000, key="datarefresh")  # Auto-refresh every 30s
+# Custom CSS for better styling
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 3rem;
+        font-weight: bold;
+        text-align: center;
+        background: linear-gradient(90deg, #ff6b6b, #4ecdc4, #45b7d1);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        margin-bottom: 2rem;
+    }
+    .metric-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 1rem;
+        border-radius: 10px;
+        color: white;
+        text-align: center;
+        margin: 0.5rem 0;
+    }
+    .prediction-box {
+        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+        padding: 1.5rem;
+        border-radius: 15px;
+        color: white;
+        text-align: center;
+        margin: 1rem 0;
+    }
+    .sidebar .sidebar-content {
+        background: linear-gradient(180deg, #2c3e50 0%, #34495e 100%);
+    }
+</style>
+""", unsafe_allow_html=True)
 
-symbols = {
-    "BTC/USDT": "BTCUSDT",
-    "ETH/USDT": "ETHUSDT",
-    "SOL/USDT": "SOLUSDT",
-    "ADA/USDT": "ADAUSDT",
-    "XRP/USDT": "XRPUSDT",
-    "DOGE/USDT": "DOGEUSDT",
-    "LTC/USDT": "LTCUSDT",
-    "MATIC/USDT": "MATICUSDT",
-    "DOT/USDT": "DOTUSDT",
-    "AVAX/USDT": "AVAXUSDT"
+# Title
+st.markdown('<h1 class="main-header">🚀 Crypto Price Predictor</h1>', unsafe_allow_html=True)
+
+# Sidebar configuration
+st.sidebar.title("⚙️ Configuration")
+
+# Cryptocurrency selection
+crypto_options = {
+    'Bitcoin': 'BTC-USD',
+    'Ethereum': 'ETH-USD',
+    'Binance Coin': 'BNB-USD',
+    'Cardano': 'ADA-USD',
+    'Solana': 'SOL-USD',
+    'Polkadot': 'DOT-USD',
+    'Dogecoin': 'DOGE-USD',
+    'Avalanche': 'AVAX-USD',
+    'Polygon': 'MATIC-USD',
+    'Chainlink': 'LINK-USD'
 }
 
-# ------------------- Signal Generator -------------------
-def generate_signal(df):
-    latest = df.iloc[-1]
-    if latest['RSI'] < 30 and latest['MACD'] > latest['MACD_Signal'] and latest['EMA10'] > latest['EMA50']:
-        return "📈 BUY"
-    elif latest['RSI'] > 70 and latest['MACD'] < latest['MACD_Signal'] and latest['EMA10'] < latest['EMA50']:
-        return "📉 SELL"
-    else:
-        return "⏸️ NEUTRAL"
+selected_crypto = st.sidebar.selectbox(
+    "Select Cryptocurrency",
+    list(crypto_options.keys()),
+    index=0
+)
 
-# ------------------- Trade Logger -------------------
-def log_trade(symbol, signal, price):
-    log_entry = {
-        "timestamp": datetime.now(),
-        "symbol": symbol,
-        "signal": signal,
-        "price": price
-    }
-    if os.path.exists("trades.csv"):
-        df = pd.read_csv("trades.csv")
-        df = pd.concat([df, pd.DataFrame([log_entry])], ignore_index=True)
-    else:
-        df = pd.DataFrame([log_entry])
-    df.to_csv("trades.csv", index=False)
+# Time period selection
+period_options = {
+    '1 Month': '1mo',
+    '3 Months': '3mo',
+    '6 Months': '6mo',
+    '1 Year': '1y',
+    '2 Years': '2y',
+    '5 Years': '5y'
+}
 
-# ------------------- Get OHLCV Data -------------------
-def get_ohlcv(symbol, interval='1m', limit=100):
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-    response = requests.get(url)
-    data = response.json()
-    df = pd.DataFrame(data, columns=[
-        "time", "open", "high", "low", "close", "volume", "_", "_", "_", "_", "_", "_"
-    ])
-    df["time"] = pd.to_datetime(df["time"], unit='ms')
-    df.set_index("time", inplace=True)
-    df = df[["open", "high", "low", "close", "volume"]].astype(float)
+selected_period = st.sidebar.selectbox(
+    "Select Time Period",
+    list(period_options.keys()),
+    index=3
+)
 
-    df['EMA10'] = df['close'].ewm(span=10, adjust=False).mean()
-    df['EMA50'] = df['close'].ewm(span=50, adjust=False).mean()
-    df['RSI'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
-    macd = ta.trend.MACD(df['close'])
-    df['MACD'] = macd.macd()
-    df['MACD_Signal'] = macd.macd_signal()
+# Prediction days
+prediction_days = st.sidebar.slider(
+    "Days to Predict",
+    min_value=1,
+    max_value=30,
+    value=7,
+    help="Number of days to predict into the future"
+)
 
-    return df
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def fetch_crypto_data(symbol, period):
+    """Fetch cryptocurrency data from Yahoo Finance"""
+    try:
+        ticker = yf.Ticker(symbol)
+        data = ticker.history(period=period)
+        return data
+    except Exception as e:
+        st.error(f"Error fetching data: {e}")
+        return None
 
-# ------------------- Backtest -------------------
-def backtest(df):
-    cash = 1000
-    position = 0
-    trades = []
-    for i in range(1, len(df)):
-        if df['RSI'].iloc[i] < 30 and df['EMA10'].iloc[i] > df['EMA50'].iloc[i]:
-            if position == 0:
-                position = cash / df['close'].iloc[i]
-                cash = 0
-                trades.append(('BUY', df.index[i], df['close'].iloc[i]))
-        elif df['RSI'].iloc[i] > 70 and df['EMA10'].iloc[i] < df['EMA50'].iloc[i]:
-            if position > 0:
-                cash = position * df['close'].iloc[i]
-                position = 0
-                trades.append(('SELL', df.index[i], df['close'].iloc[i]))
+@st.cache_data(ttl=300)
+def get_crypto_info(symbol):
+    """Get cryptocurrency information"""
+    try:
+        ticker = yf.Ticker(symbol)
+        info = ticker.info
+        return info
+    except:
+        return {}
 
-    final_value = cash + (position * df['close'].iloc[-1])
-    return trades, final_value
+def calculate_technical_indicators(data):
+    """Calculate technical indicators"""
+    # Moving averages
+    data['SMA_20'] = data['Close'].rolling(window=20).mean()
+    data['SMA_50'] = data['Close'].rolling(window=50).mean()
+    data['EMA_12'] = data['Close'].ewm(span=12).mean()
+    data['EMA_26'] = data['Close'].ewm(span=26).mean()
+    
+    # MACD
+    data['MACD'] = data['EMA_12'] - data['EMA_26']
+    data['MACD_Signal'] = data['MACD'].ewm(span=9).mean()
+    
+    # RSI
+    delta = data['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    data['RSI'] = 100 - (100 / (1 + rs))
+    
+    # Bollinger Bands
+    data['BB_Middle'] = data['Close'].rolling(window=20).mean()
+    bb_std = data['Close'].rolling(window=20).std()
+    data['BB_Upper'] = data['BB_Middle'] + (bb_std * 2)
+    data['BB_Lower'] = data['BB_Middle'] - (bb_std * 2)
+    
+    # Volume indicators
+    data['Volume_SMA'] = data['Volume'].rolling(window=20).mean()
+    
+    return data
 
-# ------------------- Scan Multiple Coins -------------------
-dashboard_data = []
+def prepare_features(data):
+    """Prepare features for machine learning model"""
+    # Price-based features
+    data['Price_Change'] = data['Close'].pct_change()
+    data['High_Low_Ratio'] = data['High'] / data['Low']
+    data['Price_Volume'] = data['Close'] * data['Volume']
+    
+    # Lag features
+    for lag in [1, 2, 3, 5, 10]:
+        data[f'Close_Lag_{lag}'] = data['Close'].shift(lag)
+        data[f'Volume_Lag_{lag}'] = data['Volume'].shift(lag)
+    
+    # Rolling statistics
+    for window in [5, 10, 20]:
+        data[f'Close_Rolling_Mean_{window}'] = data['Close'].rolling(window=window).mean()
+        data[f'Close_Rolling_Std_{window}'] = data['Close'].rolling(window=window).std()
+        data[f'Volume_Rolling_Mean_{window}'] = data['Volume'].rolling(window=window).mean()
+    
+    return data
 
-for label, ticker in symbols.items():
-    df = get_ohlcv(ticker)
-    if df.empty or df.isnull().values.any():
-        continue
-    signal = generate_signal(df)
-    price = df['close'].iloc[-1]
-    change = (price - df['close'].iloc[0]) / df['close'].iloc[0] * 100
-    dashboard_data.append({
-        "Symbol": label,
-        "Price (USDT)": round(price, 2),
-        "Change (%)": round(change, 2),
-        "Signal": signal
-    })
+def create_ml_model(data, target_days=7):
+    """Create and train machine learning model"""
+    # Prepare features
+    feature_columns = [
+        'Open', 'High', 'Low', 'Volume',
+        'SMA_20', 'SMA_50', 'EMA_12', 'EMA_26',
+        'MACD', 'MACD_Signal', 'RSI',
+        'Price_Change', 'High_Low_Ratio', 'Price_Volume'
+    ]
+    
+    # Add lag features
+    for lag in [1, 2, 3, 5, 10]:
+        feature_columns.extend([f'Close_Lag_{lag}', f'Volume_Lag_{lag}'])
+    
+    # Add rolling features
+    for window in [5, 10, 20]:
+        feature_columns.extend([
+            f'Close_Rolling_Mean_{window}',
+            f'Close_Rolling_Std_{window}',
+            f'Volume_Rolling_Mean_{window}'
+        ])
+    
+    # Create target (future price)
+    data['Target'] = data['Close'].shift(-target_days)
+    
+    # Select features that exist in the data
+    available_features = [col for col in feature_columns if col in data.columns]
+    
+    # Remove rows with NaN values
+    model_data = data[available_features + ['Target']].dropna()
+    
+    if len(model_data) < 50:
+        return None, None, None, "Insufficient data for modeling"
+    
+    X = model_data[available_features]
+    y = model_data['Target']
+    
+    # Split data
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    
+    # Scale features
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+    
+    # Train model
+    model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+    model.fit(X_train_scaled, y_train)
+    
+    # Make predictions
+    y_pred = model.predict(X_test_scaled)
+    
+    # Calculate metrics
+    mae = mean_absolute_error(y_test, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+    
+    return model, scaler, available_features, {'MAE': mae, 'RMSE': rmse}
 
-    # Optional: log signal
-    if signal in ["📈 BUY", "📉 SELL"]:
-        log_trade(label, signal, price)
+def predict_future_prices(model, scaler, data, features, days=7):
+    """Predict future prices"""
+    try:
+        # Get the last row of features
+        last_row = data[features].iloc[-1:].values
+        last_row_scaled = scaler.transform(last_row)
+        
+        # Make prediction
+        prediction = model.predict(last_row_scaled)[0]
+        return prediction
+    except Exception as e:
+        return None
 
-# ------------------- Show Dashboard -------------------
-st.subheader("📈 Live Signals")
-df_signals = pd.DataFrame(dashboard_data)
-if not df_signals.empty and "Signal" in df_signals.columns:
-    styled_df = df_signals.style.applymap(
-        lambda x: "color: green" if x == "📈 BUY" else "color: red" if x == "📉 SELL" else "",
-        subset=["Signal"]
+# Main app logic
+if st.sidebar.button("🔄 Update Data", type="primary"):
+    st.cache_data.clear()
+    st.rerun()
+
+# Fetch data
+symbol = crypto_options[selected_crypto]
+period = period_options[selected_period]
+
+with st.spinner(f"Fetching {selected_crypto} data..."):
+    data = fetch_crypto_data(symbol, period)
+    crypto_info = get_crypto_info(symbol)
+
+if data is not None and not data.empty:
+    # Calculate technical indicators
+    data = calculate_technical_indicators(data)
+    data = prepare_features(data)
+    
+    # Current price and metrics
+    current_price = data['Close'].iloc[-1]
+    prev_price = data['Close'].iloc[-2]
+    price_change = current_price - prev_price
+    price_change_pct = (price_change / prev_price) * 100
+    
+    # Display current metrics
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.markdown(f"""
+        <div class="metric-card">
+            <h3>Current Price</h3>
+            <h2>${current_price:,.2f}</h2>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col2:
+        change_color = "green" if price_change >= 0 else "red"
+        st.markdown(f"""
+        <div class="metric-card">
+            <h3>24h Change</h3>
+            <h2 style="color: {change_color};">{price_change_pct:+.2f}%</h2>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col3:
+        volume = data['Volume'].iloc[-1]
+        st.markdown(f"""
+        <div class="metric-card">
+            <h3>Volume</h3>
+            <h2>{volume:,.0f}</h2>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col4:
+        market_cap = crypto_info.get('marketCap', 'N/A')
+        if market_cap != 'N/A':
+            market_cap = f"${market_cap:,.0f}"
+        st.markdown(f"""
+        <div class="metric-card">
+            <h3>Market Cap</h3>
+            <h2>{market_cap}</h2>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # Machine Learning Prediction
+    st.subheader("🤖 AI Price Prediction")
+    
+    with st.spinner("Training prediction model..."):
+        model, scaler, features, metrics = create_ml_model(data, prediction_days)
+    
+    if model is not None:
+        # Make prediction
+        predicted_price = predict_future_prices(model, scaler, data, features, prediction_days)
+        
+        if predicted_price is not None:
+            prediction_change = predicted_price - current_price
+            prediction_change_pct = (prediction_change / current_price) * 100
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown(f"""
+                <div class="prediction-box">
+                    <h3>Predicted Price ({prediction_days} days)</h3>
+                    <h1>${predicted_price:,.2f}</h1>
+                    <p>Expected Change: {prediction_change_pct:+.2f}%</p>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col2:
+                st.markdown("**Model Performance:**")
+                st.metric("Mean Absolute Error", f"${metrics['MAE']:.2f}")
+                st.metric("Root Mean Square Error", f"${metrics['RMSE']:.2f}")
+                
+                # Model confidence
+                confidence = max(0, min(100, 100 - (metrics['MAE'] / current_price) * 100))
+                st.metric("Model Confidence", f"{confidence:.1f}%")
+    
+    # Create interactive chart
+    st.subheader("📈 Price Chart with Technical Indicators")
+    
+    # Main price chart
+    fig = make_subplots(
+        rows=3, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.05,
+        subplot_titles=('Price & Moving Averages', 'MACD', 'RSI'),
+        row_heights=[0.6, 0.2, 0.2]
     )
-    st.dataframe(styled_df)
+    
+    # Candlestick chart
+    fig.add_trace(
+        go.Candlestick(
+            x=data.index,
+            open=data['Open'],
+            high=data['High'],
+            low=data['Low'],
+            close=data['Close'],
+            name='Price',
+            increasing_line_color='#00ff88',
+            decreasing_line_color='#ff4444'
+        ),
+        row=1, col=1
+    )
+    
+    # Moving averages
+    fig.add_trace(
+        go.Scatter(x=data.index, y=data['SMA_20'], name='SMA 20', line=dict(color='orange')),
+        row=1, col=1
+    )
+    fig.add_trace(
+        go.Scatter(x=data.index, y=data['SMA_50'], name='SMA 50', line=dict(color='blue')),
+        row=1, col=1
+    )
+    
+    # Bollinger Bands
+    fig.add_trace(
+        go.Scatter(x=data.index, y=data['BB_Upper'], name='BB Upper', 
+                  line=dict(color='gray', dash='dash'), opacity=0.5),
+        row=1, col=1
+    )
+    fig.add_trace(
+        go.Scatter(x=data.index, y=data['BB_Lower'], name='BB Lower', 
+                  line=dict(color='gray', dash='dash'), opacity=0.5),
+        row=1, col=1
+    )
+    
+    # MACD
+    fig.add_trace(
+        go.Scatter(x=data.index, y=data['MACD'], name='MACD', line=dict(color='blue')),
+        row=2, col=1
+    )
+    fig.add_trace(
+        go.Scatter(x=data.index, y=data['MACD_Signal'], name='Signal', line=dict(color='red')),
+        row=2, col=1
+    )
+    
+    # RSI
+    fig.add_trace(
+        go.Scatter(x=data.index, y=data['RSI'], name='RSI', line=dict(color='purple')),
+        row=3, col=1
+    )
+    
+    # RSI levels
+    fig.add_hline(y=70, line_dash="dash", line_color="red", opacity=0.5, row=3, col=1)
+    fig.add_hline(y=30, line_dash="dash", line_color="green", opacity=0.5, row=3, col=1)
+    
+    fig.update_layout(
+        title=f"{selected_crypto} Technical Analysis",
+        height=800,
+        showlegend=True,
+        xaxis_rangeslider_visible=False,
+        template='plotly_dark'
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Technical Analysis Summary
+    st.subheader("📊 Technical Analysis Summary")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("**Current Indicators:**")
+        
+        # RSI analysis
+        current_rsi = data['RSI'].iloc[-1]
+        if current_rsi > 70:
+            rsi_signal = "🔴 Overbought"
+        elif current_rsi < 30:
+            rsi_signal = "🟢 Oversold"
+        else:
+            rsi_signal = "🟡 Neutral"
+        
+        st.write(f"RSI (14): {current_rsi:.1f} - {rsi_signal}")
+        
+        # MACD analysis
+        current_macd = data['MACD'].iloc[-1]
+        current_signal = data['MACD_Signal'].iloc[-1]
+        macd_signal = "🟢 Bullish" if current_macd > current_signal else "🔴 Bearish"
+        st.write(f"MACD: {macd_signal}")
+        
+        # Moving average analysis
+        if current_price > data['SMA_20'].iloc[-1]:
+            ma_signal = "🟢 Above SMA 20"
+        else:
+            ma_signal = "🔴 Below SMA 20"
+        st.write(f"Price vs SMA 20: {ma_signal}")
+    
+    with col2:
+        st.markdown("**Price Levels:**")
+        
+        # Support and resistance
+        recent_high = data['High'].tail(20).max()
+        recent_low = data['Low'].tail(20).min()
+        
+        st.write(f"20-day High: ${recent_high:.2f}")
+        st.write(f"20-day Low: ${recent_low:.2f}")
+        st.write(f"Price Range: {((recent_high - recent_low) / recent_low * 100):.1f}%")
+        
+        # Volatility
+        volatility = data['Close'].pct_change().std() * np.sqrt(365) * 100
+        st.write(f"Annualized Volatility: {volatility:.1f}%")
+    
+    # Risk Analysis
+    st.subheader("⚠️ Risk Analysis")
+    
+    # Calculate risk metrics
+    returns = data['Close'].pct_change().dropna()
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        # Sharpe Ratio (simplified, assuming 0% risk-free rate)
+        sharpe = returns.mean() / returns.std() * np.sqrt(365) if returns.std() != 0 else 0
+        st.metric("Sharpe Ratio", f"{sharpe:.2f}")
+    
+    with col2:
+        # Maximum Drawdown
+        cumulative = (1 + returns).cumprod()
+        running_max = cumulative.expanding().max()
+        drawdown = (cumulative - running_max) / running_max
+        max_drawdown = drawdown.min() * 100
+        st.metric("Max Drawdown", f"{max_drawdown:.1f}%")
+    
+    with col3:
+        # Value at Risk (95% confidence)
+        var_95 = np.percentile(returns, 5) * 100
+        st.metric("VaR (95%)", f"{var_95:.1f}%")
+    
+    # Data table
+    st.subheader("📋 Recent Data")
+    
+    # Display recent data
+    recent_data = data[['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MACD']].tail(10)
+    recent_data = recent_data.round(2)
+    st.dataframe(recent_data, use_container_width=True)
+    
+    # Download data option
+    csv = data.to_csv()
+    st.download_button(
+        "📥 Download Historical Data",
+        csv,
+        f"{selected_crypto}_{selected_period}_data.csv",
+        "text/csv",
+        key='download-csv'
+    )
+
 else:
-    st.warning("⚠️ No signal data available.")
+    st.error("Unable to fetch cryptocurrency data. Please try again later.")
 
-
-# ------------------- Trade Log -------------------
-if os.path.exists("trades.csv"):
-    st.subheader("📘 Trade Log")
-    trade_log = pd.read_csv("trades.csv")
-    st.dataframe(trade_log)
-
-# ------------------- Backtesting -------------------
-st.subheader("🔁 Backtest a Coin")
-coin_choice = st.selectbox("Choose Coin for Backtesting", list(symbols.keys()))
-df_backtest = get_ohlcv(symbols[coin_choice], interval="1h", limit=500)
-
-if df_backtest.empty:
-    st.error("⚠️ No data returned for backtest. Try another coin or check API rate limits.")
-else:
-    trades, final_value = backtest(df_backtest)
-    st.write(f"💰 Final Portfolio Value (Starting $1000): **${final_value:.2f}**")
-
-    st.write("📋 Trades:")
-    if trades:
-        st.table(pd.DataFrame(trades, columns=["Type", "Time", "Price"]))
-    else:
-        st.info("No trades executed in backtest period.")
+# Footer
+st.markdown("---")
+st.markdown("""
+<div style="text-align: center; color: gray;">
+    <p>⚠️ <strong>Disclaimer:</strong> This is for educational purposes only. Not financial advice. 
+    Cryptocurrency investments are highly volatile and risky.</p>
+    <p>Data provided by Yahoo Finance | Predictions are estimates and should not be used as sole investment guidance</p>
+</div>
+""", unsafe_allow_html=True)
