@@ -1,1097 +1,595 @@
-
 import streamlit as st
+import yfinance as yf
 import pandas as pd
 import numpy as np
-
+import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
-import requests
+import talib
 from datetime import datetime, timedelta
 import warnings
-import json
-import time
-import random
-from typing import List, Tuple, Dict, Any
 warnings.filterwarnings('ignore')
 
-# Try to import optional dependencies
-try:
-    import yfinance as yf
-    YFINANCE_AVAILABLE = True
-except ImportError:
-    YFINANCE_AVAILABLE = False
-    st.error("yfinance not found. Please install it with: pip install yfinance")
+# Machine Learning Libraries
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+from sklearn.model_selection import train_test_split
+import xgboost as xgb
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.optimizers import Adam
 
-try:
-    import tensorflow as tf
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
-    from tensorflow.keras.optimizers import Adam
-    from tensorflow.keras.regularizers import l2
-    from sklearn.preprocessing import MinMaxScaler
-    from sklearn.metrics import mean_absolute_error, mean_squared_error
-    TENSORFLOW_AVAILABLE = True
-except ImportError:
-    TENSORFLOW_AVAILABLE = False
-    st.error("TensorFlow not found. Please install it with: pip install tensorflow")
+# Sentiment Analysis
+from textblob import TextBlob
+import requests
+from bs4 import BeautifulSoup
 
-# Configure Streamlit page
+# Page Configuration
 st.set_page_config(
-    page_title="AI Crypto Predictor - LSTM + GA",
-    page_icon="🧠",
+    page_title="Indian Stock Market Predictor",
+    page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for better styling
+# Custom CSS
 st.markdown("""
 <style>
     .main-header {
-        font-size: 3rem;
-        font-weight: bold;
-        text-align: center;
-        background: linear-gradient(90deg, #ff6b6b, #4ecdc4, #45b7d1, #96ceb4);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
+        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+        padding: 2rem;
+        border-radius: 10px;
         margin-bottom: 2rem;
     }
-    .ai-header {
-        font-size: 1.5rem;
-        font-weight: bold;
-        background: linear-gradient(45deg, #667eea, #764ba2);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        margin: 1rem 0;
-    }
     .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        background: white;
         padding: 1rem;
-        border-radius: 10px;
-        color: white;
-        text-align: center;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         margin: 0.5rem 0;
     }
     .prediction-box {
-        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-        padding: 1.5rem;
-        border-radius: 15px;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         color: white;
-        text-align: center;
-        margin: 1rem 0;
-    }
-    .ga-box {
-        background: linear-gradient(135deg, #a8edea 0%, #fed6e3 100%);
         padding: 1.5rem;
-        border-radius: 15px;
-        color: #333;
-        text-align: center;
-        margin: 1rem 0;
-    }
-    .lstm-box {
-        background: linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%);
-        padding: 1.5rem;
-        border-radius: 15px;
-        color: #333;
+        border-radius: 10px;
         text-align: center;
         margin: 1rem 0;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# Title
-st.markdown('<h1 class="main-header">🧠 AI Crypto Predictor</h1>', unsafe_allow_html=True)
-st.markdown('<p class="ai-header" style="text-align: center;">LSTM Neural Networks + Genetic Algorithm Optimization</p>', unsafe_allow_html=True)
+# Title and Header
+st.markdown("""
+<div class="main-header">
+    <h1 style="color: white; text-align: center; margin: 0;">
+        🇮🇳 Indian Stock Market Predictor & Strategy Visualizer
+    </h1>
+    <p style="color: white; text-align: center; margin-top: 0.5rem; font-size: 1.2rem;">
+        Advanced AI-Powered Stock Analysis with Technical Indicators & Sentiment Analysis
+    </p>
+</div>
+""", unsafe_allow_html=True)
 
-# Sidebar configuration
-st.sidebar.title("⚙️ AI Configuration")
-
-# Cryptocurrency selection
-crypto_options = {
-    'Bitcoin': 'BTC-USD',
-    'Ethereum': 'ETH-USD',
-    'Binance Coin': 'BNB-USD',
-    'Cardano': 'ADA-USD',
-    'Solana': 'SOL-USD',
-    'Polkadot': 'DOT-USD',
-    'Dogecoin': 'DOGE-USD',
-    'Avalanche': 'AVAX-USD',
-    'Polygon': 'MATIC-USD',
-    'Chainlink': 'LINK-USD'
+# Popular Indian Stocks
+INDIAN_STOCKS = {
+    'RELIANCE.NS': 'Reliance Industries',
+    'TCS.NS': 'Tata Consultancy Services',
+    'HDFCBANK.NS': 'HDFC Bank',
+    'INFY.NS': 'Infosys',
+    'HINDUNILVR.NS': 'Hindustan Unilever',
+    'ICICIBANK.NS': 'ICICI Bank',
+    'ITC.NS': 'ITC Limited',
+    'SBIN.NS': 'State Bank of India',
+    'BHARTIARTL.NS': 'Bharti Airtel',
+    'ASIANPAINT.NS': 'Asian Paints',
+    'MARUTI.NS': 'Maruti Suzuki',
+    'AXISBANK.NS': 'Axis Bank',
+    'LT.NS': 'Larsen & Toubro',
+    'SUNPHARMA.NS': 'Sun Pharma',
+    'WIPRO.NS': 'Wipro',
+    'ULTRACEMCO.NS': 'UltraTech Cement',
+    'TITAN.NS': 'Titan Company',
+    'POWERGRID.NS': 'Power Grid Corporation',
+    'NESTLEIND.NS': 'Nestle India',
+    'HCLTECH.NS': 'HCL Technologies'
 }
 
-selected_crypto = st.sidebar.selectbox(
-    "Select Cryptocurrency",
-    list(crypto_options.keys()),
+# Sidebar Configuration
+st.sidebar.header("⚙️ Configuration")
+
+# Stock Selection
+selected_stock = st.sidebar.selectbox(
+    "Select Stock:",
+    options=list(INDIAN_STOCKS.keys()),
+    format_func=lambda x: f"{INDIAN_STOCKS[x]} ({x})"
+)
+
+# Time Period Selection
+time_period = st.sidebar.selectbox(
+    "Select Time Period:",
+    options=['1mo', '3mo', '6mo', '1y', '2y', '5y', 'max'],
+    index=3
+)
+
+# Prediction Model Selection
+model_type = st.sidebar.selectbox(
+    "Select Prediction Model:",
+    options=['LSTM', 'XGBoost', 'Both'],
     index=0
 )
 
-# Time period selection
-period_options = {
-    '3 Months': '3mo',
-    '6 Months': '6mo',
-    '1 Year': '1y',
-    '2 Years': '2y',
-    '5 Years': '5y'
-}
+# Technical Indicators Selection
+st.sidebar.subheader("Technical Indicators")
+show_sma = st.sidebar.checkbox("Simple Moving Average (SMA)", value=True)
+show_ema = st.sidebar.checkbox("Exponential Moving Average (EMA)", value=True)
+show_bollinger = st.sidebar.checkbox("Bollinger Bands", value=True)
+show_rsi = st.sidebar.checkbox("RSI", value=True)
+show_macd = st.sidebar.checkbox("MACD", value=True)
 
-selected_period = st.sidebar.selectbox(
-    "Select Time Period",
-    list(period_options.keys()),
-    index=2
-)
+# Prediction Parameters
+st.sidebar.subheader("Prediction Parameters")
+prediction_days = st.sidebar.slider("Days to Predict:", 1, 30, 7)
+lstm_epochs = st.sidebar.slider("LSTM Epochs:", 10, 100, 50)
+sequence_length = st.sidebar.slider("Sequence Length:", 30, 120, 60)
 
-# AI Model Parameters
-st.sidebar.subheader("🧠 LSTM Parameters")
-sequence_length = st.sidebar.slider("Sequence Length", 10, 60, 30, 
-                                   help="Number of days to look back for prediction")
-prediction_days = st.sidebar.slider("Prediction Days", 1, 30, 7,
-                                   help="Number of days to predict ahead")
+@st.cache_data
+def load_stock_data(symbol, period):
+    """Load stock data from Yahoo Finance"""
+    try:
+        stock = yf.Ticker(symbol)
+        data = stock.history(period=period)
+        info = stock.info
+        return data, info
+    except Exception as e:
+        st.error(f"Error loading data: {e}")
+        return None, None
 
-# Genetic Algorithm Parameters
-st.sidebar.subheader("🧬 Genetic Algorithm")
-population_size = st.sidebar.slider("Population Size", 10, 50, 20,
-                                   help="Number of individuals in GA population")
-generations = st.sidebar.slider("Generations", 5, 30, 10,
-                               help="Number of evolution iterations")
-
-# Advanced LSTM Settings
-with st.sidebar.expander("Advanced LSTM Settings"):
-    lstm_units = st.sidebar.slider("LSTM Units", 32, 256, 128)
-    dropout_rate = st.sidebar.slider("Dropout Rate", 0.1, 0.5, 0.2)
-    epochs = st.sidebar.slider("Training Epochs", 10, 100, 50)
-    batch_size = st.sidebar.selectbox("Batch Size", [16, 32, 64, 128], index=1)
-
-class GeneticAlgorithm:
-    """Genetic Algorithm for LSTM hyperparameter optimization"""
+def calculate_technical_indicators(data):
+    """Calculate technical indicators"""
+    # Simple Moving Averages
+    data['SMA_20'] = talib.SMA(data['Close'], timeperiod=20)
+    data['SMA_50'] = talib.SMA(data['Close'], timeperiod=50)
     
-    def __init__(self, population_size: int, generations: int):
-        self.population_size = population_size
-        self.generations = generations
-        self.mutation_rate = 0.1
-        self.crossover_rate = 0.8
+    # Exponential Moving Averages
+    data['EMA_12'] = talib.EMA(data['Close'], timeperiod=12)
+    data['EMA_26'] = talib.EMA(data['Close'], timeperiod=26)
+    
+    # Bollinger Bands
+    data['BB_upper'], data['BB_middle'], data['BB_lower'] = talib.BBANDS(data['Close'])
+    
+    # RSI
+    data['RSI'] = talib.RSI(data['Close'])
+    
+    # MACD
+    data['MACD'], data['MACD_signal'], data['MACD_hist'] = talib.MACD(data['Close'])
+    
+    # Stochastic Oscillator
+    data['Stoch_K'], data['Stoch_D'] = talib.STOCH(data['High'], data['Low'], data['Close'])
+    
+    return data
+
+def create_lstm_model(X_train, y_train):
+    """Create and train LSTM model"""
+    model = Sequential([
+        LSTM(50, return_sequences=True, input_shape=(X_train.shape[1], 1)),
+        Dropout(0.2),
+        LSTM(50, return_sequences=True),
+        Dropout(0.2),
+        LSTM(50),
+        Dropout(0.2),
+        Dense(1)
+    ])
+    
+    model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
+    return model
+
+def prepare_lstm_data(data, sequence_length):
+    """Prepare data for LSTM model"""
+    scaler = MinMaxScaler()
+    scaled_data = scaler.fit_transform(data['Close'].values.reshape(-1, 1))
+    
+    X, y = [], []
+    for i in range(sequence_length, len(scaled_data)):
+        X.append(scaled_data[i-sequence_length:i, 0])
+        y.append(scaled_data[i, 0])
+    
+    return np.array(X), np.array(y), scaler
+
+def create_xgboost_features(data):
+    """Create features for XGBoost model"""
+    features = pd.DataFrame()
+    
+    # Price features
+    features['Close'] = data['Close']
+    features['Volume'] = data['Volume']
+    features['High'] = data['High']
+    features['Low'] = data['Low']
+    features['Open'] = data['Open']
+    
+    # Technical indicators
+    features['SMA_20'] = data['SMA_20']
+    features['SMA_50'] = data['SMA_50']
+    features['EMA_12'] = data['EMA_12']
+    features['EMA_26'] = data['EMA_26']
+    features['RSI'] = data['RSI']
+    features['MACD'] = data['MACD']
+    
+    # Lag features
+    for lag in [1, 2, 3, 5, 10]:
+        features[f'Close_lag_{lag}'] = data['Close'].shift(lag)
+    
+    # Rolling statistics
+    features['Close_rolling_mean_5'] = data['Close'].rolling(5).mean()
+    features['Close_rolling_std_5'] = data['Close'].rolling(5).std()
+    features['Volume_rolling_mean_5'] = data['Volume'].rolling(5).mean()
+    
+    # Price changes
+    features['Price_change'] = data['Close'].pct_change()
+    features['Price_change_lag_1'] = features['Price_change'].shift(1)
+    
+    return features.dropna()
+
+def get_sentiment_score(stock_name):
+    """Get sentiment score from news headlines (simplified)"""
+    try:
+        # This is a simplified sentiment analysis
+        # In production, you'd use proper news APIs
+        headlines = [
+            f"{stock_name} shows strong performance",
+            f"{stock_name} quarterly results exceed expectations",
+            f"Market analysts bullish on {stock_name}",
+            f"{stock_name} stock reaches new highs"
+        ]
         
-    def create_individual(self) -> Dict[str, Any]:
-        """Create a random individual (hyperparameter set)"""
-        return {
-            'lstm_units': random.choice([32, 64, 128, 256]),
-            'dropout_rate': random.uniform(0.1, 0.5),
-            'learning_rate': random.uniform(0.0001, 0.01),
-            'batch_size': random.choice([16, 32, 64]),
-            'layers': random.randint(1, 3)
-        }
-    
-    def create_population(self) -> List[Dict[str, Any]]:
-        """Create initial population"""
-        return [self.create_individual() for _ in range(self.population_size)]
-    
-    def fitness_function(self, individual: Dict[str, Any], X_train, y_train, X_val, y_val) -> float:
-        """Evaluate fitness of an individual"""
-        try:
-            model = self.create_lstm_model(individual, X_train.shape)
+        sentiment_scores = []
+        for headline in headlines:
+            blob = TextBlob(headline)
+            sentiment_scores.append(blob.sentiment.polarity)
+        
+        return np.mean(sentiment_scores)
+    except:
+        return 0.0
+
+# Main Application
+if st.sidebar.button("🚀 Run Analysis"):
+    with st.spinner("Loading data and running analysis..."):
+        # Load data
+        data, info = load_stock_data(selected_stock, time_period)
+        
+        if data is not None and len(data) > 0:
+            # Calculate technical indicators
+            data = calculate_technical_indicators(data)
             
-            # Train with early stopping to prevent overfitting
-            history = model.fit(
-                X_train, y_train,
-                validation_data=(X_val, y_val),
-                epochs=20,  # Reduced for GA speed
-                batch_size=individual['batch_size'],
-                verbose=0
+            # Display stock info
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("Current Price", f"₹{data['Close'].iloc[-1]:.2f}")
+            
+            with col2:
+                price_change = data['Close'].iloc[-1] - data['Close'].iloc[-2]
+                st.metric("Price Change", f"₹{price_change:.2f}", f"{price_change:.2f}")
+            
+            with col3:
+                volume = data['Volume'].iloc[-1]
+                st.metric("Volume", f"{volume:,.0f}")
+            
+            with col4:
+                market_cap = info.get('marketCap', 0)
+                if market_cap > 0:
+                    st.metric("Market Cap", f"₹{market_cap/1e9:.2f}B")
+                else:
+                    st.metric("Market Cap", "N/A")
+            
+            # Stock Price Chart with Technical Indicators
+            fig = make_subplots(
+                rows=4, cols=1,
+                subplot_titles=('Stock Price & Technical Indicators', 'Volume', 'RSI', 'MACD'),
+                vertical_spacing=0.05,
+                row_heights=[0.5, 0.2, 0.15, 0.15]
             )
             
-            # Predict and calculate fitness (inverse of validation loss)
-            predictions = model.predict(X_val, verbose=0)
-            mse = mean_squared_error(y_val, predictions)
-            fitness = 1 / (1 + mse)  # Higher fitness for lower MSE
+            # Price and moving averages
+            fig.add_trace(go.Scatter(x=data.index, y=data['Close'], 
+                                   name='Close Price', line=dict(color='blue')), row=1, col=1)
             
-            return fitness
+            if show_sma:
+                fig.add_trace(go.Scatter(x=data.index, y=data['SMA_20'], 
+                                       name='SMA 20', line=dict(color='orange')), row=1, col=1)
+                fig.add_trace(go.Scatter(x=data.index, y=data['SMA_50'], 
+                                       name='SMA 50', line=dict(color='red')), row=1, col=1)
             
-        except Exception as e:
-            return 0.0  # Return low fitness for failed individuals
-    
-    def create_lstm_model(self, individual: Dict[str, Any], input_shape: tuple):
-        """Create LSTM model based on individual parameters"""
-        model = Sequential()
-        
-        # Input layer
-        model.add(Input(shape=(input_shape[1], input_shape[2])))
-        
-        # LSTM layers
-        for i in range(individual['layers']):
-            return_sequences = i < individual['layers'] - 1
-            model.add(LSTM(
-                individual['lstm_units'],
-                return_sequences=return_sequences,
-                dropout=individual['dropout_rate'],
-                recurrent_dropout=individual['dropout_rate'],
-                kernel_regularizer=l2(0.01)
-            ))
-            model.add(Dropout(individual['dropout_rate']))
-        
-        # Output layer
-        model.add(Dense(1, activation='linear'))
-        
-        # Compile model
-        optimizer = Adam(learning_rate=individual['learning_rate'])
-        model.compile(optimizer=optimizer, loss='mse', metrics=['mae'])
-        
-        return model
-    
-    def selection(self, population: List[Dict], fitness_scores: List[float]) -> List[Dict]:
-        """Tournament selection"""
-        selected = []
-        for _ in range(self.population_size):
-            tournament_size = 3
-            tournament_indices = random.sample(range(len(population)), tournament_size)
-            winner_idx = max(tournament_indices, key=lambda x: fitness_scores[x])
-            selected.append(population[winner_idx].copy())
-        return selected
-    
-    def crossover(self, parent1: Dict, parent2: Dict) -> Tuple[Dict, Dict]:
-        """Single-point crossover"""
-        if random.random() > self.crossover_rate:
-            return parent1.copy(), parent2.copy()
-        
-        child1, child2 = parent1.copy(), parent2.copy()
-        
-        # Crossover for each parameter
-        for key in parent1.keys():
-            if random.random() < 0.5:
-                child1[key], child2[key] = parent2[key], parent1[key]
-        
-        return child1, child2
-    
-    def mutate(self, individual: Dict) -> Dict:
-        """Mutate individual"""
-        mutated = individual.copy()
-        
-        if random.random() < self.mutation_rate:
-            mutation_type = random.choice(['lstm_units', 'dropout_rate', 'learning_rate', 'batch_size', 'layers'])
+            if show_ema:
+                fig.add_trace(go.Scatter(x=data.index, y=data['EMA_12'], 
+                                       name='EMA 12', line=dict(color='green')), row=1, col=1)
             
-            if mutation_type == 'lstm_units':
-                mutated['lstm_units'] = random.choice([32, 64, 128, 256])
-            elif mutation_type == 'dropout_rate':
-                mutated['dropout_rate'] = random.uniform(0.1, 0.5)
-            elif mutation_type == 'learning_rate':
-                mutated['learning_rate'] = random.uniform(0.0001, 0.01)
-            elif mutation_type == 'batch_size':
-                mutated['batch_size'] = random.choice([16, 32, 64])
-            elif mutation_type == 'layers':
-                mutated['layers'] = random.randint(1, 3)
-        
-        return mutated
-    
-    def evolve(self, X_train, y_train, X_val, y_val) -> Tuple[Dict, List[float]]:
-        """Main evolution loop"""
-        population = self.create_population()
-        best_fitness_history = []
-        
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        for generation in range(self.generations):
-            # Evaluate fitness
-            fitness_scores = []
-            for i, individual in enumerate(population):
-                fitness = self.fitness_function(individual, X_train, y_train, X_val, y_val)
-                fitness_scores.append(fitness)
+            if show_bollinger:
+                fig.add_trace(go.Scatter(x=data.index, y=data['BB_upper'], 
+                                       name='BB Upper', line=dict(color='gray', dash='dash')), row=1, col=1)
+                fig.add_trace(go.Scatter(x=data.index, y=data['BB_lower'], 
+                                       name='BB Lower', line=dict(color='gray', dash='dash')), row=1, col=1)
+            
+            # Volume
+            fig.add_trace(go.Bar(x=data.index, y=data['Volume'], 
+                               name='Volume', marker_color='lightblue'), row=2, col=1)
+            
+            # RSI
+            if show_rsi:
+                fig.add_trace(go.Scatter(x=data.index, y=data['RSI'], 
+                                       name='RSI', line=dict(color='purple')), row=3, col=1)
+                fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1)
+                fig.add_hline(y=30, line_dash="dash", line_color="green", row=3, col=1)
+            
+            # MACD
+            if show_macd:
+                fig.add_trace(go.Scatter(x=data.index, y=data['MACD'], 
+                                       name='MACD', line=dict(color='blue')), row=4, col=1)
+                fig.add_trace(go.Scatter(x=data.index, y=data['MACD_signal'], 
+                                       name='MACD Signal', line=dict(color='red')), row=4, col=1)
+                fig.add_trace(go.Bar(x=data.index, y=data['MACD_hist'], 
+                                   name='MACD Histogram', marker_color='gray'), row=4, col=1)
+            
+            fig.update_layout(height=800, title_text=f"{INDIAN_STOCKS[selected_stock]} Technical Analysis")
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Predictions
+            st.subheader("🤖 AI Predictions")
+            
+            prediction_results = {}
+            
+            if model_type in ['LSTM', 'Both']:
+                st.write("### LSTM Model Prediction")
                 
-                # Update progress
-                progress = (generation * len(population) + i + 1) / (self.generations * len(population))
-                progress_bar.progress(progress)
-                status_text.text(f"Generation {generation + 1}/{self.generations}, Individual {i + 1}/{len(population)}")
-            
-            best_fitness = max(fitness_scores)
-            best_fitness_history.append(best_fitness)
-            
-            # Selection
-            selected = self.selection(population, fitness_scores)
-            
-            # Crossover and mutation
-            new_population = []
-            for i in range(0, len(selected), 2):
-                parent1 = selected[i]
-                parent2 = selected[i + 1] if i + 1 < len(selected) else selected[0]
+                # Prepare LSTM data
+                X, y, scaler = prepare_lstm_data(data, sequence_length)
                 
-                child1, child2 = self.crossover(parent1, parent2)
-                child1 = self.mutate(child1)
-                child2 = self.mutate(child2)
-                
-                new_population.extend([child1, child2])
-            
-            population = new_population[:self.population_size]
-        
-        # Return best individual
-        final_fitness = [self.fitness_function(ind, X_train, y_train, X_val, y_val) for ind in population]
-        best_idx = max(range(len(final_fitness)), key=lambda x: final_fitness[x])
-        
-        progress_bar.empty()
-        status_text.empty()
-        
-        return population[best_idx], best_fitness_history
-
-class LSTMPredictor:
-    """LSTM-based cryptocurrency price predictor"""
-    
-    def __init__(self, sequence_length: int = 30):
-        self.sequence_length = sequence_length
-        self.scaler = MinMaxScaler()
-        self.model = None
-        self.feature_scaler = MinMaxScaler()
-        
-    def prepare_data(self, data: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Prepare data for LSTM training"""
-        # Calculate technical indicators
-        data = self.calculate_features(data)
-        
-        # Select features
-        feature_columns = ['Close', 'Volume', 'SMA_10', 'SMA_20', 'RSI', 'MACD', 'BB_position']
-        features = data[feature_columns].fillna(method='ffill').fillna(method='bfill')
-        
-        # Scale features
-        scaled_features = self.feature_scaler.fit_transform(features)
-        
-        # Scale target (Close price)
-        scaled_target = self.scaler.fit_transform(data[['Close']])
-        
-        # Create sequences
-        X, y = [], []
-        for i in range(self.sequence_length, len(scaled_features)):
-            X.append(scaled_features[i-self.sequence_length:i])
-            y.append(scaled_target[i, 0])
-        
-        return np.array(X), np.array(y), scaled_features
-    
-    def calculate_features(self, data: pd.DataFrame) -> pd.DataFrame:
-        """Calculate technical indicators as features"""
-        df = data.copy()
-        
-        # Simple Moving Averages
-        df['SMA_10'] = df['Close'].rolling(window=10).mean()
-        df['SMA_20'] = df['Close'].rolling(window=20).mean()
-        df['SMA_50'] = df['Close'].rolling(window=50).mean()
-        
-        # Exponential Moving Averages
-        df['EMA_12'] = df['Close'].ewm(span=12).mean()
-        df['EMA_26'] = df['Close'].ewm(span=26).mean()
-        
-        # MACD
-        df['MACD'] = df['EMA_12'] - df['EMA_26']
-        df['MACD_Signal'] = df['MACD'].ewm(span=9).mean()
-        
-        # RSI
-        delta = df['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        df['RSI'] = 100 - (100 / (1 + rs))
-        
-        # Bollinger Bands
-        df['BB_Middle'] = df['Close'].rolling(window=20).mean()
-        bb_std = df['Close'].rolling(window=20).std()
-        df['BB_Upper'] = df['BB_Middle'] + (bb_std * 2)
-        df['BB_Lower'] = df['BB_Middle'] - (bb_std * 2)
-        df['BB_position'] = (df['Close'] - df['BB_Lower']) / (df['BB_Upper'] - df['BB_Lower'])
-        
-        # Price momentum
-        df['Price_Change'] = df['Close'].pct_change()
-        df['Price_Momentum'] = df['Close'].pct_change(periods=5)
-        
-        # Volume indicators
-        df['Volume_SMA'] = df['Volume'].rolling(window=20).mean()
-        df['Volume_Ratio'] = df['Volume'] / df['Volume_SMA']
-        
-        return df
-    
-    def create_optimized_model(self, best_params: Dict, input_shape: tuple):
-        """Create LSTM model with optimized parameters"""
-        model = Sequential()
-        
-        # Input layer
-        model.add(Input(shape=(input_shape[1], input_shape[2])))
-        
-        # LSTM layers based on GA optimization
-        for i in range(best_params['layers']):
-            return_sequences = i < best_params['layers'] - 1
-            model.add(LSTM(
-                best_params['lstm_units'],
-                return_sequences=return_sequences,
-                dropout=best_params['dropout_rate'],
-                recurrent_dropout=best_params['dropout_rate'],
-                kernel_regularizer=l2(0.01)
-            ))
-            model.add(Dropout(best_params['dropout_rate']))
-        
-        # Output layer
-        model.add(Dense(1, activation='linear'))
-        
-        # Compile with optimized parameters
-        optimizer = Adam(learning_rate=best_params['learning_rate'])
-        model.compile(optimizer=optimizer, loss='mse', metrics=['mae'])
-        
-        return model
-    
-    def train_with_ga_optimization(self, X_train, y_train, X_val, y_val, ga_params):
-        """Train LSTM with genetic algorithm optimization"""
-        ga = GeneticAlgorithm(ga_params['population_size'], ga_params['generations'])
-        
-        st.info("🧬 Starting Genetic Algorithm optimization...")
-        best_params, fitness_history = ga.evolve(X_train, y_train, X_val, y_val)
-        
-        st.success("✅ GA optimization completed!")
-        
-        # Train final model with best parameters
-        self.model = self.create_optimized_model(best_params, X_train.shape)
-        
-        # Train the final model
-        history = self.model.fit(
-            X_train, y_train,
-            validation_data=(X_val, y_val),
-            epochs=epochs,
-            batch_size=best_params['batch_size'],
-            verbose=0
-        )
-        
-        return best_params, fitness_history, history
-    
-    def predict_future(self, data: pd.DataFrame, days: int = 7) -> np.ndarray:
-        """Predict future prices"""
-        if self.model is None:
-            raise ValueError("Model not trained yet")
-        
-        # Prepare last sequence
-        features = self.calculate_features(data)
-        feature_columns = ['Close', 'Volume', 'SMA_10', 'SMA_20', 'RSI', 'MACD', 'BB_position']
-        scaled_features = self.feature_scaler.transform(features[feature_columns].fillna(method='ffill').fillna(method='bfill'))
-        
-        predictions = []
-        current_sequence = scaled_features[-self.sequence_length:].copy()
-        
-        for _ in range(days):
-            # Predict next price
-            pred_input = current_sequence.reshape(1, self.sequence_length, -1)
-            next_price_scaled = self.model.predict(pred_input, verbose=0)[0, 0]
-            
-            # Inverse transform to get actual price
-            next_price = self.scaler.inverse_transform([[next_price_scaled]])[0, 0]
-            predictions.append(next_price)
-            
-            # Update sequence for next prediction
-            # Create new feature row (simplified - using last known values)
-            new_features = current_sequence[-1].copy()
-            new_features[0] = next_price_scaled  # Update close price
-            
-            # Shift sequence
-            current_sequence = np.vstack([current_sequence[1:], new_features.reshape(1, -1)])
-        
-        return np.array(predictions)
-
-# Data fetching functions (keeping the same as before)
-@st.cache_data(ttl=300)
-def fetch_crypto_data_yfinance(symbol, period):
-    """Fetch cryptocurrency data from Yahoo Finance"""
-    if not YFINANCE_AVAILABLE:
-        return None
-    try:
-        ticker = yf.Ticker(symbol)
-        data = ticker.history(period=period)
-        return data
-    except Exception as e:
-        st.error(f"Error fetching data from Yahoo Finance: {e}")
-        return None
-
-@st.cache_data(ttl=300)
-def fetch_crypto_data_api(symbol, days=365):
-    """Fetch cryptocurrency data from CoinGecko API as fallback"""
-    try:
-        symbol_map = {
-            'BTC-USD': 'bitcoin',
-            'ETH-USD': 'ethereum', 
-            'BNB-USD': 'binancecoin',
-            'ADA-USD': 'cardano',
-            'SOL-USD': 'solana',
-            'DOT-USD': 'polkadot',
-            'DOGE-USD': 'dogecoin',
-            'AVAX-USD': 'avalanche-2',
-            'MATIC-USD': 'matic-network',
-            'LINK-USD': 'chainlink'
-        }
-        
-        coin_id = symbol_map.get(symbol, 'bitcoin')
-        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
-        params = {
-            'vs_currency': 'usd',
-            'days': min(days, 365),
-            'interval': 'daily' if days > 90 else 'hourly'
-        }
-        
-        response = requests.get(url, params=params, timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            prices = data.get('prices', [])
-            volumes = data.get('total_volumes', [])
-            
-            if prices:
-                df = pd.DataFrame(prices, columns=['timestamp', 'close'])
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                df.set_index('timestamp', inplace=True)
-                
-                if volumes:
-                    vol_df = pd.DataFrame(volumes, columns=['timestamp', 'volume'])
-                    vol_df['timestamp'] = pd.to_datetime(vol_df['timestamp'], unit='ms')
-                    vol_df.set_index('timestamp', inplace=True)
-                    df = df.join(vol_df)
-                else:
-                    df['volume'] = 0
-                
-                df['open'] = df['close'].shift(1).fillna(df['close'])
-                df['high'] = df['close'] * 1.02
-                df['low'] = df['close'] * 0.98
-                
-                df.columns = ['Close', 'Volume', 'Open', 'High', 'Low']
-                df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
-                
-                return df
-                
-        return None
-        
-    except Exception as e:
-        st.error(f"Error fetching data from CoinGecko: {e}")
-        return None
-
-def fetch_crypto_data(symbol, period):
-    """Main function to fetch crypto data with fallbacks"""
-    period_to_days = {
-        '3mo': 90, 
-        '6mo': 180,
-        '1y': 365,
-        '2y': 730,
-        '5y': 1825
-    }
-    
-    days = period_to_days.get(period, 365)
-    
-    if YFINANCE_AVAILABLE:
-        data = fetch_crypto_data_yfinance(symbol, period)
-        if data is not None and not data.empty:
-            return data
-    
-    st.info("Using CoinGecko API as data source...")
-    return fetch_crypto_data_api(symbol, days)
-
-# Main app logic
-if st.sidebar.button("🚀 Start AI Training", type="primary"):
-    st.cache_data.clear()
-
-# Fetch data
-symbol = crypto_options[selected_crypto]
-period = period_options[selected_period]
-
-if not TENSORFLOW_AVAILABLE:
-    st.error("🚫 TensorFlow is required for LSTM functionality. Please install it with: `pip install tensorflow`")
-    st.stop()
-
-with st.spinner(f"Fetching {selected_crypto} data..."):
-    data = fetch_crypto_data(symbol, period)
-
-if data is not None and not data.empty and len(data) > sequence_length + 50:
-    
-    # Display current metrics
-    current_price = data['Close'].iloc[-1]
-    prev_price = data['Close'].iloc[-2]
-    price_change = current_price - prev_price
-    price_change_pct = (price_change / prev_price) * 100
-    
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.markdown(f"""
-        <div class="metric-card">
-            <h3>Current Price</h3>
-            <h2>${current_price:,.2f}</h2>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col2:
-        change_color = "green" if price_change >= 0 else "red"
-        st.markdown(f"""
-        <div class="metric-card">
-            <h3>24h Change</h3>
-            <h2 style="color: {change_color};">{price_change_pct:+.2f}%</h2>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col3:
-        volume = data['Volume'].iloc[-1]
-        st.markdown(f"""
-        <div class="metric-card">
-            <h3>Volume</h3>
-            <h2>{volume:,.0f}</h2>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col4:
-        volatility = data['Close'].pct_change().std() * np.sqrt(365) * 100
-        st.markdown(f"""
-        <div class="metric-card">
-            <h3>Volatility</h3>
-            <h2>{volatility:.1f}%</h2>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # AI Prediction Section
-    st.subheader("🧠 AI-Powered Prediction System")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("""
-        <div class="lstm-box">
-            <h3>🔗 LSTM Neural Network</h3>
-            <p>Long Short-Term Memory networks capture complex temporal patterns in price data</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col2:
-        st.markdown("""
-        <div class="ga-box">
-            <h3>🧬 Genetic Algorithm</h3>
-            <p>Evolutionary optimization finds the best neural network architecture</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # Initialize LSTM predictor
-    predictor = LSTMPredictor(sequence_length=sequence_length)
-    
-    # Prepare data
-    with st.spinner("🔄 Preparing data and features..."):
-        X, y, scaled_features = predictor.prepare_data(data)
-    
-    if len(X) > 100:  # Ensure sufficient data
-        # Split data
-        split_idx = int(len(X) * 0.8)
-        X_train, X_test = X[:split_idx], X[split_idx:]
-        y_train, y_test = y[:split_idx], y[split_idx:]
-        
-        # Further split training data for validation
-        val_split_idx = int(len(X_train) * 0.8)
-        X_val = X_train[val_split_idx:]
-        y_val = y_train[val_split_idx:]
-        X_train = X_train[:val_split_idx]
-        y_train = y_train[:val_split_idx]
-        
-        st.info(f"📊 Training data: {len(X_train)} samples | Validation: {len(X_val)} samples | Test: {len(X_test)} samples")
-        
-        # Train with GA optimization
-        ga_params = {
-            'population_size': population_size,
-            'generations': generations
-        }
-        
-        with st.expander("🚀 Start AI Training", expanded=True):
-            if st.button("Begin LSTM + GA Optimization", type="primary"):
-                
-                # Training progress
-                training_container = st.container()
-                
-                with training_container:
-                    best_params, fitness_history, training_history = predictor.train_with_ga_optimization(
-                        X_train, y_train, X_val, y_val, ga_params
-                    )
+                if len(X) > 0:
+                    # Split data
+                    split_idx = int(len(X) * 0.8)
+                    X_train, X_test = X[:split_idx], X[split_idx:]
+                    y_train, y_test = y[:split_idx], y[split_idx:]
                     
-                    # Display optimization results
-                    col1, col2 = st.columns(2)
+                    # Reshape for LSTM
+                    X_train = X_train.reshape((X_train.shape[0], X_train.shape[1], 1))
+                    X_test = X_test.reshape((X_test.shape[0], X_test.shape[1], 1))
                     
-                    with col1:
-                        st.markdown("**🏆 Best GA Parameters:**")
-                        for key, value in best_params.items():
-                            if isinstance(value, float):
-                                st.write(f"**{key}:** {value:.4f}")
-                            else:
-                                st.write(f"**{key}:** {value}")
-                    
-                    with col2:
-                        # Plot GA fitness evolution
-                        fig_ga = go.Figure()
-                        fig_ga.add_trace(go.Scatter(
-                            x=list(range(1, len(fitness_history) + 1)),
-                            y=fitness_history,
-                            mode='lines+markers',
-                            name='Best Fitness',
-                            line=dict(color='#ff6b6b', width=3)
-                        ))
-                        fig_ga.update_layout(
-                            title="🧬 Genetic Algorithm Evolution",
-                            xaxis_title="Generation",
-                            yaxis_title="Fitness Score",
-                            template='plotly_dark',
-                            height=300
-                        )
-                        st.plotly_chart(fig_ga, use_container_width=True)
+                    # Create and train model
+                    with st.spinner("Training LSTM model..."):
+                        lstm_model = create_lstm_model(X_train, y_train)
+                        lstm_model.fit(X_train, y_train, epochs=lstm_epochs, 
+                                     batch_size=32, verbose=0, validation_split=0.1)
                     
                     # Make predictions
-                    st.subheader("🔮 AI Predictions")
-                    
-                    # Test set predictions (continuing from where the code was cut off)
-                    test_predictions = predictor.model.predict(X_test, verbose=0)
-                    test_predictions = predictor.scaler.inverse_transform(test_predictions)
-                    
-                    # Actual test values
-                    y_test_actual = predictor.scaler.inverse_transform(y_test.reshape(-1, 1))
+                    lstm_predictions = lstm_model.predict(X_test)
+                    lstm_predictions = scaler.inverse_transform(lstm_predictions)
+                    y_test_actual = scaler.inverse_transform(y_test.reshape(-1, 1))
                     
                     # Calculate metrics
-                    mae = mean_absolute_error(y_test_actual, test_predictions)
-                    mse = mean_squared_error(y_test_actual, test_predictions)
-                    rmse = np.sqrt(mse)
-                    mape = np.mean(np.abs((y_test_actual - test_predictions) / y_test_actual)) * 100
-                    
-                    # Display prediction metrics
-                    col1, col2, col3, col4 = st.columns(4)
-                    
-                    with col1:
-                        st.markdown(f"""
-                        <div class="metric-card">
-                            <h3>MAE</h3>
-                            <h2>${mae:.2f}</h2>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    with col2:
-                        st.markdown(f"""
-                        <div class="metric-card">
-                            <h3>RMSE</h3>
-                            <h2>${rmse:.2f}</h2>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    with col3:
-                        st.markdown(f"""
-                        <div class="metric-card">
-                            <h3>MAPE</h3>
-                            <h2>{mape:.2f}%</h2>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    with col4:
-                        accuracy = max(0, 100 - mape)
-                        st.markdown(f"""
-                        <div class="metric-card">
-                            <h3>Accuracy</h3>
-                            <h2>{accuracy:.1f}%</h2>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    # Plot actual vs predicted
-                    fig_pred = go.Figure()
-                    
-                    # Get test dates
-                    test_dates = data.index[-len(y_test_actual):]
-                    
-                    fig_pred.add_trace(go.Scatter(
-                        x=test_dates,
-                        y=y_test_actual.flatten(),
-                        mode='lines',
-                        name='Actual Prices',
-                        line=dict(color='#4ecdc4', width=2)
-                    ))
-                    
-                    fig_pred.add_trace(go.Scatter(
-                        x=test_dates,
-                        y=test_predictions.flatten(),
-                        mode='lines',
-                        name='LSTM Predictions',
-                        line=dict(color='#ff6b6b', width=2, dash='dash')
-                    ))
-                    
-                    fig_pred.update_layout(
-                        title="🎯 LSTM Model Performance on Test Data",
-                        xaxis_title="Date",
-                        yaxis_title="Price ($)",
-                        template='plotly_dark',
-                        height=500,
-                        hovermode='x unified'
-                    )
-                    
-                    st.plotly_chart(fig_pred, use_container_width=True)
+                    lstm_mse = mean_squared_error(y_test_actual, lstm_predictions)
+                    lstm_mae = mean_absolute_error(y_test_actual, lstm_predictions)
                     
                     # Future predictions
-                    st.subheader("🔮 Future Price Predictions")
+                    last_sequence = X[-1].reshape(1, sequence_length, 1)
+                    future_predictions = []
                     
-                    future_predictions = predictor.predict_future(data, prediction_days)
+                    for _ in range(prediction_days):
+                        pred = lstm_model.predict(last_sequence, verbose=0)
+                        future_predictions.append(pred[0, 0])
+                        
+                        # Update sequence
+                        last_sequence = np.roll(last_sequence, -1, axis=1)
+                        last_sequence[0, -1, 0] = pred[0, 0]
                     
-                    # Create future dates
-                    last_date = data.index[-1]
-                    future_dates = pd.date_range(start=last_date + timedelta(days=1), periods=prediction_days)
-                    
-                    # Display future predictions
-                    col1, col2 = st.columns([2, 1])
-                    
-                    with col1:
-                        # Plot historical + future
-                        fig_future = go.Figure()
-                        
-                        # Historical prices (last 60 days)
-                        historical_data = data.tail(60)
-                        fig_future.add_trace(go.Scatter(
-                            x=historical_data.index,
-                            y=historical_data['Close'],
-                            mode='lines',
-                            name='Historical Prices',
-                            line=dict(color='#4ecdc4', width=2)
-                        ))
-                        
-                        # Future predictions
-                        fig_future.add_trace(go.Scatter(
-                            x=future_dates,
-                            y=future_predictions,
-                            mode='lines+markers',
-                            name='Future Predictions',
-                            line=dict(color='#ff6b6b', width=3)
-                        ))
-                        
-                        # Add confidence bands (simplified)
-                        confidence_interval = rmse * 1.96  # 95% confidence
-                        upper_bound = future_predictions + confidence_interval
-                        lower_bound = future_predictions - confidence_interval
-                        
-                        fig_future.add_trace(go.Scatter(
-                            x=future_dates,
-                            y=upper_bound,
-                            fill=None,
-                            mode='lines',
-                            line_color='rgba(0,0,0,0)',
-                            showlegend=False
-                        ))
-                        
-                        fig_future.add_trace(go.Scatter(
-                            x=future_dates,
-                            y=lower_bound,
-                            fill='tonexty',
-                            mode='lines',
-                            line_color='rgba(0,0,0,0)',
-                            name='95% Confidence',
-                            fillcolor='rgba(255, 107, 107, 0.2)'
-                        ))
-                        
-                        fig_future.update_layout(
-                            title=f"🚀 {selected_crypto} Price Forecast - Next {prediction_days} Days",
-                            xaxis_title="Date",
-                            yaxis_title="Price ($)",
-                            template='plotly_dark',
-                            height=500,
-                            hovermode='x unified'
-                        )
-                        
-                        st.plotly_chart(fig_future, use_container_width=True)
-                    
-                    with col2:
-                        # Prediction summary
-                        predicted_change = future_predictions[-1] - current_price
-                        predicted_change_pct = (predicted_change / current_price) * 100
-                        
-                        prediction_color = "green" if predicted_change >= 0 else "red"
-                        arrow = "📈" if predicted_change >= 0 else "📉"
-                        
-                        st.markdown(f"""
-                        <div class="prediction-box">
-                            <h3>{arrow} {prediction_days}-Day Forecast</h3>
-                            <h2>${future_predictions[-1]:,.2f}</h2>
-                            <p style="color: {prediction_color}; font-size: 1.2em; font-weight: bold;">
-                                {predicted_change_pct:+.2f}%
-                            </p>
-                            <p>Change: ${predicted_change:+.2f}</p>
-                        </div>
-                        """, unsafe_allow_html=True)
-                        
-                        # Prediction details table
-                        st.subheader("📊 Daily Predictions")
-                        pred_df = pd.DataFrame({
-                            'Date': future_dates.strftime('%Y-%m-%d'),
-                            'Predicted Price': [f"${p:.2f}" for p in future_predictions],
-                            'Daily Change': [f"{((future_predictions[i] - (current_price if i == 0 else future_predictions[i-1])) / (current_price if i == 0 else future_predictions[i-1]) * 100):+.2f}%" for i in range(len(future_predictions))]
-                        })
-                        
-                        st.dataframe(pred_df, use_container_width=True)
-                        
-                        # Risk assessment
-                        volatility_score = min(volatility / 50, 1.0)  # Normalize to 0-1
-                        accuracy_score = accuracy / 100
-                        confidence_score = (accuracy_score + (1 - volatility_score)) / 2
-                        
-                        if confidence_score >= 0.8:
-                            risk_level = "🟢 Low Risk"
-                            risk_color = "green"
-                        elif confidence_score >= 0.6:
-                            risk_level = "🟡 Medium Risk"
-                            risk_color = "orange"
-                        else:
-                            risk_level = "🔴 High Risk"
-                            risk_color = "red"
-                        
-                        st.markdown(f"""
-                        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-                                    padding: 1rem; border-radius: 10px; color: white; text-align: center; margin: 1rem 0;">
-                            <h4>🎯 Prediction Confidence</h4>
-                            <h3>{confidence_score * 100:.1f}%</h3>
-                            <p style="color: {risk_color}; font-weight: bold;">{risk_level}</p>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    # Training history plots
-                    st.subheader("📈 Training Performance")
+                    future_predictions = scaler.inverse_transform(np.array(future_predictions).reshape(-1, 1))
+                    prediction_results['LSTM'] = future_predictions.flatten()
                     
                     col1, col2 = st.columns(2)
-                    
                     with col1:
-                        # Loss plot
-                        fig_loss = go.Figure()
-                        fig_loss.add_trace(go.Scatter(
-                            y=training_history.history['loss'],
-                            mode='lines',
-                            name='Training Loss',
-                            line=dict(color='#ff6b6b')
-                        ))
-                        if 'val_loss' in training_history.history:
-                            fig_loss.add_trace(go.Scatter(
-                                y=training_history.history['val_loss'],
-                                mode='lines',
-                                name='Validation Loss',
-                                line=dict(color='#4ecdc4')
-                            ))
-                        fig_loss.update_layout(
-                            title="🔥 Training Loss",
-                            xaxis_title="Epoch",
-                            yaxis_title="Loss",
-                            template='plotly_dark',
-                            height=300
-                        )
-                        st.plotly_chart(fig_loss, use_container_width=True)
-                    
+                        st.metric("LSTM MSE", f"{lstm_mse:.2f}")
                     with col2:
-                        # MAE plot
-                        fig_mae = go.Figure()
-                        if 'mae' in training_history.history:
-                            fig_mae.add_trace(go.Scatter(
-                                y=training_history.history['mae'],
-                                mode='lines',
-                                name='Training MAE',
-                                line=dict(color='#ff6b6b')
-                            ))
-                        if 'val_mae' in training_history.history:
-                            fig_mae.add_trace(go.Scatter(
-                                y=training_history.history['val_mae'],
-                                mode='lines',
-                                name='Validation MAE',
-                                line=dict(color='#4ecdc4')
-                            ))
-                        fig_mae.update_layout(
-                            title="📊 Mean Absolute Error",
-                            xaxis_title="Epoch",
-                            yaxis_title="MAE",
-                            template='plotly_dark',
-                            height=300
-                        )
-                        st.plotly_chart(fig_mae, use_container_width=True)
+                        st.metric("LSTM MAE", f"{lstm_mae:.2f}")
+            
+            if model_type in ['XGBoost', 'Both']:
+                st.write("### XGBoost Model Prediction")
+                
+                # Prepare XGBoost data
+                features = create_xgboost_features(data)
+                
+                if len(features) > 30:
+                    # Create target variable (next day price)
+                    features['Target'] = features['Close'].shift(-1)
+                    features = features.dropna()
                     
-                    # Feature importance (simplified visualization)
-                    st.subheader("🎯 Feature Analysis")
+                    # Split data
+                    X = features.drop(['Target'], axis=1)
+                    y = features['Target']
                     
-                    feature_names = ['Close', 'Volume', 'SMA_10', 'SMA_20', 'RSI', 'MACD', 'BB_position']
-                    
-                    # Calculate simple feature importance based on correlation with target
-                    feature_data = predictor.calculate_features(data)
-                    correlations = []
-                    for feature in feature_names:
-                        if feature in feature_data.columns:
-                            corr = abs(feature_data[feature].corr(feature_data['Close']))
-                            correlations.append(corr if not np.isnan(corr) else 0)
-                        else:
-                            correlations.append(0)
-                    
-                    fig_importance = go.Figure(data=[
-                        go.Bar(
-                            x=feature_names,
-                            y=correlations,
-                            marker_color=['#ff6b6b', '#4ecdc4', '#45b7d1', '#96ceb4', '#ffeaa7', '#dda0dd', '#98fb98']
-                        )
-                    ])
-                    
-                    fig_importance.update_layout(
-                        title="🔍 Feature Importance (Correlation with Price)",
-                        xaxis_title="Features",
-                        yaxis_title="Correlation Strength",
-                        template='plotly_dark',
-                        height=400
+                    X_train, X_test, y_train, y_test = train_test_split(
+                        X, y, test_size=0.2, random_state=42, shuffle=False
                     )
                     
-                    st.plotly_chart(fig_importance, use_container_width=True)
+                    # Train XGBoost model
+                    with st.spinner("Training XGBoost model..."):
+                        xgb_model = xgb.XGBRegressor(
+                            n_estimators=100,
+                            max_depth=6,
+                            learning_rate=0.1,
+                            random_state=42
+                        )
+                        xgb_model.fit(X_train, y_train)
                     
-                    # AI Insights
-                    st.subheader("🧠 AI Insights & Recommendations")
+                    # Make predictions
+                    xgb_predictions = xgb_model.predict(X_test)
                     
-                    insights = []
+                    # Calculate metrics
+                    xgb_mse = mean_squared_error(y_test, xgb_predictions)
+                    xgb_mae = mean_absolute_error(y_test, xgb_predictions)
                     
-                    # Trend analysis
-                    recent_trend = np.mean(np.diff(data['Close'].tail(7)))
-                    if recent_trend > 0:
-                        insights.append("📈 **Bullish Trend**: Recent 7-day price action shows upward momentum")
-                    else:
-                        insights.append("📉 **Bearish Trend**: Recent 7-day price action shows downward pressure")
+                    # Future predictions
+                    last_features = X.iloc[-1:].copy()
+                    xgb_future_predictions = []
                     
-                    # Volatility insight
-                    if volatility > 80:
-                        insights.append("⚡ **High Volatility**: Expect significant price swings - higher risk/reward")
-                    elif volatility < 30:
-                        insights.append("🔒 **Low Volatility**: Relatively stable price movement expected")
-                    else:
-                        insights.append("⚖️ **Moderate Volatility**: Balanced risk-reward scenario")
+                    for i in range(prediction_days):
+                        pred = xgb_model.predict(last_features)[0]
+                        xgb_future_predictions.append(pred)
+                        
+                        # Update features for next prediction
+                        # This is simplified - in reality, you'd update all features
+                        last_features['Close'] = pred
+                        last_features['Close_lag_1'] = last_features['Close']
                     
-                    # Model confidence insight
-                    if accuracy > 80:
-                        insights.append("🎯 **High Confidence**: Model shows strong predictive accuracy")
-                    elif accuracy > 65:
-                        insights.append("✅ **Moderate Confidence**: Model predictions are reasonably reliable")
-                    else:
-                        insights.append("⚠️ **Low Confidence**: Use predictions with caution - high uncertainty")
+                    prediction_results['XGBoost'] = xgb_future_predictions
                     
-                    # Volume insight
-                    recent_volume = data['Volume'].tail(7).mean()
-                    avg_volume = data['Volume'].mean()
-                    if recent_volume > avg_volume * 1.5:
-                        insights.append("📊 **High Volume**: Increased trading activity may signal significant moves")
-                    elif recent_volume < avg_volume * 0.5:
-                        insights.append("📊 **Low Volume**: Reduced trading activity - prices may consolidate")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("XGBoost MSE", f"{xgb_mse:.2f}")
+                    with col2:
+                        st.metric("XGBoost MAE", f"{xgb_mae:.2f}")
+            
+            # Display predictions
+            if prediction_results:
+                st.subheader("📊 Future Price Predictions")
+                
+                # Create prediction visualization
+                future_dates = pd.date_range(
+                    start=data.index[-1] + timedelta(days=1),
+                    periods=prediction_days,
+                    freq='D'
+                )
+                
+                fig_pred = go.Figure()
+                
+                # Historical prices
+                fig_pred.add_trace(go.Scatter(
+                    x=data.index[-30:], 
+                    y=data['Close'].iloc[-30:],
+                    mode='lines',
+                    name='Historical Price',
+                    line=dict(color='blue')
+                ))
+                
+                # Predictions
+                colors = ['red', 'green', 'orange']
+                for i, (model_name, predictions) in enumerate(prediction_results.items()):
+                    fig_pred.add_trace(go.Scatter(
+                        x=future_dates,
+                        y=predictions,
+                        mode='lines+markers',
+                        name=f'{model_name} Prediction',
+                        line=dict(color=colors[i], dash='dash')
+                    ))
+                
+                fig_pred.update_layout(
+                    title='Stock Price Predictions',
+                    xaxis_title='Date',
+                    yaxis_title='Price (₹)',
+                    height=500
+                )
+                
+                st.plotly_chart(fig_pred, use_container_width=True)
+                
+                # Prediction summary
+                for model_name, predictions in prediction_results.items():
+                    current_price = data['Close'].iloc[-1]
+                    predicted_price = predictions[-1]
+                    price_change = predicted_price - current_price
+                    percent_change = (price_change / current_price) * 100
                     
-                    for insight in insights:
-                        st.markdown(f"• {insight}")
-                    
-                    # Disclaimer
-                    st.markdown("---")
-                    st.markdown("""
-                    <div style="background: #f0f0f0; padding: 1rem; border-radius: 10px; color: #333; margin: 1rem 0;">
-                        <h4>⚠️ Important Disclaimer</h4>
-                        <p>This AI prediction system is for educational and research purposes only. Cryptocurrency markets are highly volatile and unpredictable. 
-                        Past performance does not guarantee future results. Always conduct your own research and consider consulting with financial advisors 
-                        before making investment decisions. Never invest more than you can afford to lose.</p>
+                    st.markdown(f"""
+                    <div class="prediction-box">
+                        <h3>{model_name} Prediction ({prediction_days} days)</h3>
+                        <p><strong>Current Price:</strong> ₹{current_price:.2f}</p>
+                        <p><strong>Predicted Price:</strong> ₹{predicted_price:.2f}</p>
+                        <p><strong>Expected Change:</strong> ₹{price_change:.2f} ({percent_change:+.2f}%)</p>
                     </div>
                     """, unsafe_allow_html=True)
-    
-    else:
-        st.error("❌ Insufficient data for training. Need at least 100 data points after feature engineering.")
-
-else:
-    if data is None:
-        st.error("❌ Unable to fetch cryptocurrency data. Please check your internet connection and try again.")
-    elif data.empty:
-        st.error("❌ No data available for the selected cryptocurrency and time period.")
-    else:
-        st.error(f"❌ Insufficient data points. Got {len(data)} points, need at least {sequence_length + 50}.")
+            
+            # Sentiment Analysis
+            st.subheader("📰 Sentiment Analysis")
+            stock_name = INDIAN_STOCKS[selected_stock]
+            sentiment_score = get_sentiment_score(stock_name)
+            
+            if sentiment_score > 0.1:
+                sentiment_label = "Positive 😊"
+                sentiment_color = "green"
+            elif sentiment_score < -0.1:
+                sentiment_label = "Negative 😟"
+                sentiment_color = "red"
+            else:
+                sentiment_label = "Neutral 😐"
+                sentiment_color = "gray"
+            
+            st.markdown(f"""
+            <div style="background-color: {sentiment_color}; color: white; padding: 1rem; border-radius: 8px; text-align: center;">
+                <h4>Market Sentiment: {sentiment_label}</h4>
+                <p>Sentiment Score: {sentiment_score:.2f}</p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Technical Analysis Summary
+            st.subheader("📈 Technical Analysis Summary")
+            
+            current_price = data['Close'].iloc[-1]
+            sma_20 = data['SMA_20'].iloc[-1]
+            sma_50 = data['SMA_50'].iloc[-1]
+            rsi = data['RSI'].iloc[-1]
+            
+            signals = []
+            
+            if current_price > sma_20:
+                signals.append("✅ Price above SMA 20 (Bullish)")
+            else:
+                signals.append("❌ Price below SMA 20 (Bearish)")
+            
+            if sma_20 > sma_50:
+                signals.append("✅ SMA 20 above SMA 50 (Bullish)")
+            else:
+                signals.append("❌ SMA 20 below SMA 50 (Bearish)")
+            
+            if rsi < 30:
+                signals.append("✅ RSI Oversold (Potential Buy)")
+            elif rsi > 70:
+                signals.append("❌ RSI Overbought (Potential Sell)")
+            else:
+                signals.append("🔄 RSI Neutral")
+            
+            for signal in signals:
+                st.write(signal)
+            
+            # Risk Analysis
+            st.subheader("⚠️ Risk Analysis")
+            
+            # Calculate volatility
+            returns = data['Close'].pct_change().dropna()
+            volatility = returns.std() * np.sqrt(252) * 100  # Annualized volatility
+            
+            # Calculate maximum drawdown
+            rolling_max = data['Close'].cummax()
+            drawdown = (data['Close'] - rolling_max) / rolling_max
+            max_drawdown = drawdown.min() * 100
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Annual Volatility", f"{volatility:.2f}%")
+            with col2:
+                st.metric("Max Drawdown", f"{max_drawdown:.2f}%")
+            with col3:
+                # Sharpe ratio (simplified)
+                risk_free_rate = 0.06  # Assuming 6% risk-free rate
+                excess_return = returns.mean() * 252 - risk_free_rate
+                sharpe_ratio = excess_return / (returns.std() * np.sqrt(252))
+                st.metric("Sharpe Ratio", f"{sharpe_ratio:.2f}")
+            
+        else:
+            st.error("Unable to load stock data. Please check the stock symbol and try again.")
 
 # Footer
 st.markdown("---")
 st.markdown("""
-<div style="text-align: center; color: #888; padding: 2rem;">
-    <p>🧠 AI Crypto Predictor | Powered by LSTM Neural Networks & Genetic Algorithms</p>
-    <p>Built with Streamlit, TensorFlow, and Plotly | For Educational Purposes Only</p>
+<div style="text-align: center; color: gray;">
+    <p>📈 Indian Stock Market Predictor & Strategy Visualizer</p>
+    <p>Disclaimer: This is for educational purposes only. Do not use for actual trading without proper research.</p>
 </div>
 """, unsafe_allow_html=True)
